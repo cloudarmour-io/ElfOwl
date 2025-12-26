@@ -49,15 +49,48 @@ func NewEnricher(k8sClient *kubernetes.Client, clusterID, nodeName string) (*Enr
 // These methods query K8s API and parse pod specs to populate enrichment fields
 
 // getPodMetadata retrieves pod metadata from K8s API, using cache when available
+// ANCHOR: Pod metadata lookup via K8s API - Phase 2.2, Dec 26, 2025
+// First checks local enricher cache, then queries K8s API for pod metadata via container ID
 func (e *Enricher) getPodMetadata(ctx context.Context, containerID string) *PodMetadata {
 	if e.K8sClient == nil || containerID == "" {
 		return nil
 	}
 
-	// For now, return nil since GetPodByContainerID is not yet implemented
-	// Phase 3 will implement full K8s API queries
-	// This is a placeholder that allows enricher to work without full K8s integration
-	return nil
+	// Check local enricher cache first
+	e.containerToPodMutex.RLock()
+	cachedMapping, found := e.containerToPodCache[containerID]
+	e.containerToPodMutex.RUnlock()
+
+	if found {
+		// Parse cached mapping: "namespace/podname"
+		parts := strings.Split(cachedMapping, "/")
+		if len(parts) == 2 {
+			// Use K8s client to retrieve the pod metadata with its cache
+			metadata, err := e.K8sClient.GetPodMetadata(ctx, parts[0], parts[1])
+			if err != nil {
+				e.Logger.Debug("failed to get pod metadata from cache", zap.Error(err))
+				return nil
+			}
+			return metadata
+		}
+	}
+
+	// Query K8s API for pod lookup by container ID
+	metadata, err := e.K8sClient.GetPodByContainerID(ctx, containerID)
+	if err != nil {
+		e.Logger.Debug("failed to find pod by container ID", zap.String("containerID", containerID), zap.Error(err))
+		return nil
+	}
+
+	if metadata != nil {
+		// Cache the mapping locally for future use
+		mapping := fmt.Sprintf("%s/%s", metadata.Namespace, metadata.Name)
+		e.containerToPodMutex.Lock()
+		e.containerToPodCache[containerID] = mapping
+		e.containerToPodMutex.Unlock()
+	}
+
+	return metadata
 }
 
 // parseImageRegistry extracts registry from full image path (e.g. "docker.io/library/nginx:latest" -> "docker.io")

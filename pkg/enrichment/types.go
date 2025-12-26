@@ -5,6 +5,8 @@ package enrichment
 
 import (
 	"time"
+
+	"github.com/udyansh/elf-owl/pkg/kubernetes"
 )
 
 // EnrichedEvent is an event with added K8s, container, and runtime context
@@ -123,26 +125,12 @@ type CapabilityContext struct {
 	UID     uint32 `json:"uid"`
 }
 
-// PodMetadata is the cached pod metadata
-type PodMetadata struct {
-	Name           string
-	Namespace      string
-	UID            string
-	ServiceAccount string
-	Image          string
-	ImageRegistry  string
-	ImageTag       string
-	Labels         map[string]string
-	OwnerRef       *OwnerReference
-}
+// Note: PodMetadata and NodeMetadata are defined in kubernetes package
+// to avoid circular imports. We import and re-export them here for convenience.
 
-// NodeMetadata is the cached node metadata
-type NodeMetadata struct {
-	Name     string
-	Labels   map[string]string
-	Taints   []string
-	Capacity map[string]string
-}
+// Type aliases to kubernetes types to avoid duplication
+type PodMetadata = kubernetes.PodMetadata
+type NodeMetadata = kubernetes.NodeMetadata
 
 // ANCHOR: Network and DNS contexts for Phase 1 - Dec 26, 2025
 // Support for network policy and DNS rule matching
