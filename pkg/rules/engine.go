@@ -242,7 +242,9 @@ func contains(slice []string, item string) bool {
 }
 
 // loadCISRules loads all CIS Kubernetes v1.8 control rules
+// ANCHOR: Load stub CIS rules from cis_mappings.go - Dec 26, 2025
+// Returns the 6 automated stub controls defined in CISControls variable.
+// Full implementation with 48 total automated controls planned for Week 2.
 func loadCISRules() []*Rule {
-	// TODO: Week 2 implementation - Load from loadCISRules() in cis_mappings.go
-	return []*Rule{}
+	return CISControls
 }

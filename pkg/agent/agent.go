@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"sync"
 	"time"
 
 	"go.uber.org/zap"
@@ -51,9 +52,14 @@ type Agent struct {
 	// Control channels
 	done               chan struct{}
 	eventsChan         chan interface{}
+	startTime          time.Time
+
+	// ANCHOR: Mutex-protected counters for goroutine safety - Dec 26, 2025
+	// Multiple event handler goroutines (process, network, file, capability) access
+	// eventsProcessed and violationsFound concurrently. Mutex ensures atomic increments.
+	metricsMutex       sync.Mutex
 	eventsProcessed    int64
 	violationsFound    int64
-	startTime          time.Time
 }
 
 // HealthStatus represents the agent's health status
@@ -295,7 +301,9 @@ func (a *Agent) handleProcessEvents(ctx context.Context) {
 			// Run through rule engine
 			violations := a.RuleEngine.Match(enrichedEvent)
 			if len(violations) > 0 {
+				a.metricsMutex.Lock()
 				a.violationsFound += int64(len(violations))
+				a.metricsMutex.Unlock()
 				for _, violation := range violations {
 					a.Logger.Info("CIS violation detected",
 						zap.String("control", violation.ControlID),
@@ -307,7 +315,9 @@ func (a *Agent) handleProcessEvents(ctx context.Context) {
 
 			// Queue for evidence processing
 			a.EventBuffer.Enqueue(enrichedEvent, violations)
+			a.metricsMutex.Lock()
 			a.eventsProcessed++
+			a.metricsMutex.Unlock()
 
 		case err := <-a.ProcessMonitor.Errors():
 			a.Logger.Warn("process monitor error", zap.Error(err))
@@ -335,11 +345,15 @@ func (a *Agent) handleNetworkEvents(ctx context.Context) {
 
 			violations := a.RuleEngine.Match(enrichedEvent)
 			if len(violations) > 0 {
+				a.metricsMutex.Lock()
 				a.violationsFound += int64(len(violations))
+				a.metricsMutex.Unlock()
 			}
 
 			a.EventBuffer.Enqueue(enrichedEvent, violations)
+			a.metricsMutex.Lock()
 			a.eventsProcessed++
+			a.metricsMutex.Unlock()
 
 		case err := <-a.NetworkMonitor.Errors():
 			a.Logger.Warn("network monitor error", zap.Error(err))
@@ -403,11 +417,15 @@ func (a *Agent) handleFileEvents(ctx context.Context) {
 
 			violations := a.RuleEngine.Match(enrichedEvent)
 			if len(violations) > 0 {
+				a.metricsMutex.Lock()
 				a.violationsFound += int64(len(violations))
+				a.metricsMutex.Unlock()
 			}
 
 			a.EventBuffer.Enqueue(enrichedEvent, violations)
+			a.metricsMutex.Lock()
 			a.eventsProcessed++
+			a.metricsMutex.Unlock()
 
 		case err := <-a.FileMonitor.Errors():
 			a.Logger.Warn("file monitor error", zap.Error(err))
@@ -435,11 +453,15 @@ func (a *Agent) handleCapabilityEvents(ctx context.Context) {
 
 			violations := a.RuleEngine.Match(enrichedEvent)
 			if len(violations) > 0 {
+				a.metricsMutex.Lock()
 				a.violationsFound += int64(len(violations))
+				a.metricsMutex.Unlock()
 			}
 
 			a.EventBuffer.Enqueue(enrichedEvent, violations)
+			a.metricsMutex.Lock()
 			a.eventsProcessed++
+			a.metricsMutex.Unlock()
 
 		case err := <-a.CapabilityMonitor.Errors():
 			a.Logger.Warn("capability monitor error", zap.Error(err))
@@ -498,8 +520,12 @@ func (a *Agent) collectMetrics(ctx context.Context) {
 	for {
 		select {
 		case <-ticker.C:
+			// ANCHOR: Mutex protection for metric reads - Dec 26, 2025
+			// Lock while reading counters to prevent tearing reads from concurrent modifications
+			a.metricsMutex.Lock()
 			processed := a.eventsProcessed
 			violations := a.violationsFound
+			a.metricsMutex.Unlock()
 
 			a.Logger.Debug("metrics",
 				zap.Int64("events_processed", processed),
@@ -572,12 +598,20 @@ func (a *Agent) Stop() error {
 
 // Health returns the agent's current health status
 func (a *Agent) Health() HealthStatus {
+	// ANCHOR: Mutex protection for health status reads - Dec 26, 2025
+	// Lock while reading eventsProcessed and violationsFound to ensure
+	// they are not being modified by concurrent event handler goroutines
+	a.metricsMutex.Lock()
+	eventsProcessed := a.eventsProcessed
+	violationsFound := a.violationsFound
+	a.metricsMutex.Unlock()
+
 	return HealthStatus{
 		AgentVersion:     "0.1.0",
 		Uptime:           time.Since(a.startTime),
 		Status:           "healthy",
-		EventsProcessed:  a.eventsProcessed,
-		ViolationsFound:  a.violationsFound,
+		EventsProcessed:  eventsProcessed,
+		ViolationsFound:  violationsFound,
 		LastPushTime:     a.APIClient.LastPushTime(),
 		PushFailureCount: a.APIClient.FailureCount(),
 		Monitors: map[string]bool{
@@ -621,10 +655,11 @@ func (a *Agent) getEncryptionKey() string {
 
 	// ANCHOR: Default development encryption key - Dec 26, 2025
 	// 32-byte key (256-bit) base64-encoded for AES-256-GCM
-	// Equivalent to: [32 bytes of 0xAA repeated]
-	// This is intentionally insecure for development/testing only
+	// This decodes to exactly 32 bytes (verified: len(base64.StdEncoding.DecodeString(...)) == 32)
+	// Pattern: 32 repetitions of 0x55, base64-encoded = "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVU="
+	// This is intentionally insecure for development/testing only - NEVER use in production
 	a.Logger.Warn("using default encryption key - NOT SECURE - development only")
-	return "qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq"
+	return "VVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVVU="
 }
 
 func (a *Agent) getJWTToken() string {
