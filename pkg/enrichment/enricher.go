@@ -167,7 +167,14 @@ func (e *Enricher) EnrichProcessEvent(
 	// Apply pod security context
 	if podMeta != nil {
 		// Pod-level security context
-		containerCtx.RunAsRoot = (podMeta.RunAsUser == 0) || podMeta.RunAsRootContainer
+		// ANCHOR: Determine RunAsRoot using K8s security context booleans - Phase 2.2 fix, Dec 26, 2025
+		// RunAsNonRoot boolean is the authoritative field; fall back to RunAsRootContainer only if not set
+		// Don't use RunAsUser == 0 since zero is the default when field is unspecified
+		if podMeta.RunAsNonRoot {
+			containerCtx.RunAsRoot = false
+		} else {
+			containerCtx.RunAsRoot = podMeta.RunAsRootContainer || (gobpfEvent.UID == 0)
+		}
 		containerCtx.AllowPrivilegeEscalation = podMeta.AllowPrivilegeEscalation
 		containerCtx.Privileged = podMeta.Privileged
 		containerCtx.ReadOnlyFilesystem = podMeta.ReadOnlyRootFilesystem

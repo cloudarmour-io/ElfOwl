@@ -117,8 +117,11 @@ func (c *Client) GetPodMetadata(ctx context.Context, namespace, podName string) 
 	}
 
 	// AppArmor profile from pod annotations
-	if pod.Annotations != nil {
-		apparmorProfile = pod.Annotations["container.apparmor.security.beta.kubernetes.io/"]
+	// ANCHOR: Extract AppArmor profile with container name in annotation key - Phase 2.2 fix, Dec 26, 2025
+	// K8s annotation key includes container name suffix, e.g. container.apparmor.security.beta.kubernetes.io/{container_name}
+	if pod.Annotations != nil && len(pod.Spec.Containers) > 0 {
+		containerName := pod.Spec.Containers[0].Name
+		apparmorProfile = pod.Annotations["container.apparmor.security.beta.kubernetes.io/"+containerName]
 	}
 
 	// Container-level security context (from first container)
