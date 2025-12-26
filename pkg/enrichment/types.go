@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// EnrichedEvent is an event with added K8s and container context
+// EnrichedEvent is an event with added K8s, container, and runtime context
 type EnrichedEvent struct {
 	// Original goBPF event
 	RawEvent  interface{} `json:"raw_event"`
@@ -18,6 +18,11 @@ type EnrichedEvent struct {
 
 	// Container context
 	Container *ContainerContext `json:"container"`
+
+	// Process/file/capability context (populated where applicable)
+	Process    *ProcessContext    `json:"process"`
+	File       *FileContext       `json:"file"`
+	Capability *CapabilityContext `json:"capability"`
 
 	// Derived fields
 	Timestamp  time.Time `json:"timestamp"`
@@ -39,6 +44,7 @@ type K8sContext struct {
 	Labels                      map[string]string `json:"labels"`
 	OwnerRef                    *OwnerReference   `json:"owner_ref"`
 	AutomountServiceAccountToken bool             `json:"automount_service_account_token"`
+	HasDefaultDenyNetworkPolicy  bool             `json:"has_default_deny_network_policy"`
 }
 
 // OwnerReference identifies the owner of a pod
@@ -54,6 +60,34 @@ type ContainerContext struct {
 	Runtime       string            `json:"runtime"`
 	ContainerName string            `json:"container_name"`
 	Labels        map[string]string `json:"labels"`
+	Privileged    bool              `json:"privileged"`
+	RunAsRoot     bool              `json:"run_as_root"`
+}
+
+// ProcessContext captures process metadata from goBPF events
+type ProcessContext struct {
+	PID         uint32 `json:"pid"`
+	UID         uint32 `json:"uid"`
+	GID         uint32 `json:"gid"`
+	Command     string `json:"command"`
+	Filename    string `json:"filename"`
+	ContainerID string `json:"container_id"`
+}
+
+// FileContext captures file metadata from goBPF events
+type FileContext struct {
+	Path      string `json:"path"`
+	Operation string `json:"operation"`
+	PID       uint32 `json:"pid"`
+	UID       uint32 `json:"uid"`
+}
+
+// CapabilityContext captures capability usage metadata
+type CapabilityContext struct {
+	Name    string `json:"name"`
+	Allowed bool   `json:"allowed"`
+	PID     uint32 `json:"pid"`
+	UID     uint32 `json:"uid"`
 }
 
 // PodMetadata is the cached pod metadata

@@ -60,7 +60,18 @@ func (e *Enricher) EnrichProcessEvent(
 			ClusterID: e.ClusterID,
 			NodeName:  e.NodeName,
 		},
-		Container: &ContainerContext{},
+		Container: &ContainerContext{
+			ContainerID: gobpfEvent.ContainerID,
+			RunAsRoot:   gobpfEvent.UID == 0,
+		},
+		Process: &ProcessContext{
+			PID:         gobpfEvent.PID,
+			UID:         gobpfEvent.UID,
+			GID:         gobpfEvent.GID,
+			Command:     gobpfEvent.Comm,
+			Filename:    gobpfEvent.Filename,
+			ContainerID: gobpfEvent.ContainerID,
+		},
 	}
 
 	return enrichedEvent, nil
@@ -140,7 +151,20 @@ func (e *Enricher) EnrichFileEvent(
 			ClusterID: e.ClusterID,
 			NodeName:  e.NodeName,
 		},
-		Container: &ContainerContext{},
+		Container: &ContainerContext{
+			RunAsRoot: gobpfEvent.UID == 0,
+		},
+		Process: &ProcessContext{
+			PID:     gobpfEvent.PID,
+			UID:     gobpfEvent.UID,
+			Command: gobpfEvent.Comm,
+		},
+		File: &FileContext{
+			Path:      gobpfEvent.Path,
+			Operation: gobpfEvent.Type.String(),
+			PID:       gobpfEvent.PID,
+			UID:       gobpfEvent.UID,
+		},
 	}
 
 	return enrichedEvent, nil
@@ -165,7 +189,20 @@ func (e *Enricher) EnrichCapabilityEvent(
 			ClusterID: e.ClusterID,
 			NodeName:  e.NodeName,
 		},
-		Container: &ContainerContext{},
+		Container: &ContainerContext{
+			RunAsRoot: gobpfEvent.UID == 0,
+		},
+		Process: &ProcessContext{
+			PID:     gobpfEvent.PID,
+			UID:     gobpfEvent.UID,
+			Command: gobpfEvent.Comm,
+		},
+		Capability: &CapabilityContext{
+			Name:    gobpfEvent.Capability.String(),
+			Allowed: gobpfEvent.Allowed,
+			PID:     gobpfEvent.PID,
+			UID:     gobpfEvent.UID,
+		},
 	}
 
 	return enrichedEvent, nil

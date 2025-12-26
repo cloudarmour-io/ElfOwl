@@ -21,7 +21,7 @@ var CISControls = []*Rule{
 		Conditions: []Condition{
 			{
 				Field:    "container.security_context.privileged",
-				Operator: "==",
+				Operator: "equals",
 				Value:    true,
 			},
 		},
@@ -36,12 +36,12 @@ var CISControls = []*Rule{
 		Conditions: []Condition{
 			{
 				Field:    "process.uid",
-				Operator: "==",
+				Operator: "equals",
 				Value:    0,
 			},
 			{
 				Field:    "kubernetes.pod_uid",
-				Operator: "!=",
+				Operator: "not_equals",
 				Value:    "",
 			},
 		},
@@ -92,7 +92,7 @@ var CISControls = []*Rule{
 		Conditions: []Condition{
 			{
 				Field:    "kubernetes.service_account",
-				Operator: "==",
+				Operator: "equals",
 				Value:    "default",
 			},
 		},
@@ -107,7 +107,7 @@ var CISControls = []*Rule{
 		Conditions: []Condition{
 			{
 				Field:    "kubernetes.has_default_deny_policy",
-				Operator: "!=",
+				Operator: "not_equals",
 				Value:    true,
 			},
 		},

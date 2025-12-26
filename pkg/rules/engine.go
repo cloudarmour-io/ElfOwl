@@ -6,6 +6,7 @@ package rules
 
 import (
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 
@@ -112,11 +113,11 @@ func (e *Engine) evaluateCondition(event *enrichment.EnrichedEvent, cond Conditi
 
 	// Evaluate based on operator
 	switch cond.Operator {
-	case "equals":
-		return fieldValue == cond.Value
+	case "equals", "==":
+		return reflect.DeepEqual(fieldValue, cond.Value)
 
-	case "not_equals":
-		return fieldValue != cond.Value
+	case "not_equals", "!=":
+		return !reflect.DeepEqual(fieldValue, cond.Value)
 
 	case "contains":
 		// String contains check
@@ -128,33 +129,17 @@ func (e *Engine) evaluateCondition(event *enrichment.EnrichedEvent, cond Conditi
 		return false
 
 	case "in":
-		// Check if fieldValue is in list
-		if values, ok := cond.Value.([]interface{}); ok {
-			for _, v := range values {
-				if fieldValue == v {
-					return true
-				}
-			}
-		}
-		return false
+		return valueInSlice(cond.Value, fieldValue)
 
 	case "greater_than":
-		// Numeric comparison
-		if fv, ok := fieldValue.(int); ok {
-			if cv, ok := cond.Value.(int); ok {
-				return fv > cv
-			}
-		}
-		return false
+		fv, fOk := toFloat(fieldValue)
+		cv, cOk := toFloat(cond.Value)
+		return fOk && cOk && fv > cv
 
 	case "less_than":
-		// Numeric comparison
-		if fv, ok := fieldValue.(int); ok {
-			if cv, ok := cond.Value.(int); ok {
-				return fv < cv
-			}
-		}
-		return false
+		fv, fOk := toFloat(fieldValue)
+		cv, cOk := toFloat(cond.Value)
+		return fOk && cOk && fv < cv
 
 	default:
 		e.Logger.Warn("unknown operator", zap.String("operator", cond.Operator))
@@ -208,6 +193,10 @@ func (e *Engine) extractField(event *enrichment.EnrichedEvent, fieldPath string)
 		if event.Kubernetes != nil {
 			return event.Kubernetes.ServiceAccount
 		}
+	case "kubernetes.has_default_deny_policy":
+		if event.Kubernetes != nil {
+			return event.Kubernetes.HasDefaultDenyNetworkPolicy
+		}
 
 	// Container context fields
 	case "container.id":
@@ -222,12 +211,94 @@ func (e *Engine) extractField(event *enrichment.EnrichedEvent, fieldPath string)
 		if event.Container != nil {
 			return event.Container.Runtime
 		}
+	case "container.security_context.privileged":
+		if event.Container != nil {
+			return event.Container.Privileged
+		}
+	case "container.run_as_root":
+		if event.Container != nil {
+			return event.Container.RunAsRoot
+		}
+
+	// Process fields
+	case "process.uid":
+		if event.Process != nil {
+			return int(event.Process.UID)
+		}
+	case "process.pid":
+		if event.Process != nil {
+			return int(event.Process.PID)
+		}
+	case "process.command":
+		if event.Process != nil {
+			return event.Process.Command
+		}
+
+	// File fields
+	case "file.path":
+		if event.File != nil {
+			return event.File.Path
+		}
+	case "file.operation":
+		if event.File != nil {
+			return event.File.Operation
+		}
+
+	// Capability fields
+	case "capability.name":
+		if event.Capability != nil {
+			return event.Capability.Name
+		}
+	case "capability.allowed":
+		if event.Capability != nil {
+			return event.Capability.Allowed
+		}
 
 	default:
 		return nil
 	}
 
 	return nil
+}
+
+// valueInSlice checks if fieldValue is contained within slice-like condValue
+func valueInSlice(condValue interface{}, fieldValue interface{}) bool {
+	val := reflect.ValueOf(condValue)
+	if val.Kind() != reflect.Slice && val.Kind() != reflect.Array {
+		return false
+	}
+
+	for i := 0; i < val.Len(); i++ {
+		if reflect.DeepEqual(val.Index(i).Interface(), fieldValue) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// toFloat converts ints uints etc. to float64 for comparisons
+func toFloat(value interface{}) (float64, bool) {
+	switch v := value.(type) {
+	case int:
+		return float64(v), true
+	case int32:
+		return float64(v), true
+	case int64:
+		return float64(v), true
+	case uint:
+		return float64(v), true
+	case uint32:
+		return float64(v), true
+	case uint64:
+		return float64(v), true
+	case float32:
+		return float64(v), true
+	case float64:
+		return v, true
+	default:
+		return 0, false
+	}
 }
 
 // Helper functions
