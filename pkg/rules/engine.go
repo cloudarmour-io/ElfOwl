@@ -28,11 +28,12 @@ type Engine struct {
 // Supports loading rules from file, ConfigMap, or hardcoded defaults
 // Implements fallback chain: file → ConfigMap → hardcoded CISControls
 type EngineConfig struct {
-	RuleFilePath      string                // Path to YAML rules file
-	ConfigMapName     string                // Kubernetes ConfigMap name
+	RuleFilePath       string                // Path to YAML rules file
+	ConfigMapName      string                // Kubernetes ConfigMap name
 	ConfigMapNamespace string                // Kubernetes ConfigMap namespace
-	K8sClientset      *kubernetes.Clientset // K8s client for ConfigMap API access
-	Ctx               context.Context       // Context for K8s API calls
+	ConfigMapDataKey   string                // ConfigMap data key for rule YAML (default: "rules.yaml")
+	K8sClientset       *kubernetes.Clientset // K8s client for ConfigMap API access
+	Ctx                context.Context       // Context for K8s API calls
 }
 
 // Rule defines a CIS control detection rule
@@ -107,7 +108,18 @@ func NewEngine(ruleFilePath ...string) (*Engine, error) {
 // Implements full fallback chain: file → ConfigMap → hardcoded CISControls
 // Allows fine-grained control over rule source selection
 func NewEngineWithConfig(config *EngineConfig) (*Engine, error) {
+	// Validate config is not nil
+	if config == nil {
+		return nil, fmt.Errorf("EngineConfig cannot be nil")
+	}
+
 	logger, _ := zap.NewProduction()
+
+	// Set default ConfigMap data key if not specified
+	dataKey := config.ConfigMapDataKey
+	if dataKey == "" {
+		dataKey = "rules.yaml"
+	}
 
 	var rules []*Rule
 	var ruleSource string
@@ -125,7 +137,7 @@ func NewEngineWithConfig(config *EngineConfig) (*Engine, error) {
 				if config.Ctx == nil {
 					config.Ctx = context.Background()
 				}
-				loadedRules, err := LoadRulesFromConfigMap(config.Ctx, config.K8sClientset, config.ConfigMapName, config.ConfigMapNamespace)
+				loadedRules, err := LoadRulesFromConfigMap(config.Ctx, config.K8sClientset, config.ConfigMapName, config.ConfigMapNamespace, dataKey)
 				if err != nil {
 					logger.Warn("failed to load rules from ConfigMap, using hardcoded rules",
 						zap.String("configmap", config.ConfigMapName),
@@ -157,7 +169,7 @@ func NewEngineWithConfig(config *EngineConfig) (*Engine, error) {
 		if config.Ctx == nil {
 			config.Ctx = context.Background()
 		}
-		loadedRules, err := LoadRulesFromConfigMap(config.Ctx, config.K8sClientset, config.ConfigMapName, config.ConfigMapNamespace)
+		loadedRules, err := LoadRulesFromConfigMap(config.Ctx, config.K8sClientset, config.ConfigMapName, config.ConfigMapNamespace, dataKey)
 		if err != nil {
 			logger.Warn("failed to load rules from ConfigMap, using hardcoded rules",
 				zap.String("configmap", config.ConfigMapName),

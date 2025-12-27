@@ -125,19 +125,26 @@ func TestNewEngineWithConfig(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Handle nil config case
+			// Handle nil config case - should now return error instead of panicking
 			if tt.config == nil {
-				// This should be caught by the function
-				defer func() {
-					if r := recover(); r != nil {
-						if !tt.shouldFail {
-							t.Errorf("unexpected panic: %v", r)
-						}
-					}
-				}()
+				engine, err := NewEngineWithConfig(tt.config)
 
-				// Skip actual test - this would require changing the function
-				t.Skip("Nil config should be handled before calling function")
+				if tt.shouldFail {
+					if err == nil {
+						t.Errorf("expected error for nil config, got nil")
+						return
+					}
+					if !containsSubstring(err.Error(), tt.expectedError) {
+						t.Errorf("expected error containing %q, got %q", tt.expectedError, err.Error())
+					}
+					if engine != nil {
+						t.Errorf("expected nil engine when config is nil, got %v", engine)
+					}
+				} else {
+					if err != nil {
+						t.Errorf("unexpected error: %v", err)
+					}
+				}
 				return
 			}
 

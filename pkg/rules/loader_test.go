@@ -522,7 +522,8 @@ func TestLoadRulesFromConfigMapBasics(t *testing.T) {
 				clientset = tt.clientset.(*kubernetes.Clientset)
 			}
 
-			_, err := LoadRulesFromConfigMap(ctx, clientset, tt.configMapName, tt.configMapNamespace)
+			// Use default data key "rules.yaml" for these tests
+		_, err := LoadRulesFromConfigMap(ctx, clientset, tt.configMapName, tt.configMapNamespace, "rules.yaml")
 
 			if tt.shouldFail {
 				if err == nil {

@@ -128,12 +128,16 @@ func convertYAMLToRule(ruleYAML *RuleYAML) (*Rule, error) {
 // ANCHOR: ConfigMap-based rule loading via K8s API - Phase 3.2 Week 3
 // Queries K8s API server for ConfigMap in specified namespace
 // Parses YAML content from ConfigMap data field using standard K8s clientset
-func LoadRulesFromConfigMap(ctx context.Context, clientset *kubernetes.Clientset, configMapName, configMapNamespace string) ([]*Rule, error) {
+// Supports configurable data key (e.g., "rules.yaml", "cis-controls.yaml", etc.)
+func LoadRulesFromConfigMap(ctx context.Context, clientset *kubernetes.Clientset, configMapName, configMapNamespace, dataKey string) ([]*Rule, error) {
 	if configMapName == "" {
 		return nil, fmt.Errorf("ConfigMap name cannot be empty")
 	}
 	if configMapNamespace == "" {
 		return nil, fmt.Errorf("ConfigMap namespace cannot be empty")
+	}
+	if dataKey == "" {
+		return nil, fmt.Errorf("ConfigMap data key cannot be empty")
 	}
 
 	if clientset == nil {
@@ -146,11 +150,10 @@ func LoadRulesFromConfigMap(ctx context.Context, clientset *kubernetes.Clientset
 		return nil, fmt.Errorf("failed to get ConfigMap %s/%s: %w", configMapNamespace, configMapName, err)
 	}
 
-	// Extract YAML content from ConfigMap data
-	// Standard key is "rules.yaml" for rule definitions
-	yamlContent, exists := configMap.Data["rules.yaml"]
+	// Extract YAML content from ConfigMap data using specified key
+	yamlContent, exists := configMap.Data[dataKey]
 	if !exists {
-		return nil, fmt.Errorf("ConfigMap %s/%s does not contain 'rules.yaml' key", configMapNamespace, configMapName)
+		return nil, fmt.Errorf("ConfigMap %s/%s does not contain '%s' key", configMapNamespace, configMapName, dataKey)
 	}
 
 	if yamlContent == "" {
