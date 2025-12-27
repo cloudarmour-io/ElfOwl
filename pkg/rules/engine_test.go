@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"go.uber.org/zap"
+
 	"github.com/udyansh/elf-owl/pkg/enrichment"
 )
 
@@ -60,9 +62,20 @@ func TestNewEngine(t *testing.T) {
 				return
 			}
 
+			// Verify we got rules (either from file or hardcoded fallback)
 			if len(engine.Rules) == 0 {
 				t.Errorf("engine has no rules loaded")
 				return
+			}
+
+			// Verify rules have required fields
+			for i, rule := range engine.Rules {
+				if rule.ControlID == "" {
+					t.Errorf("rule %d has empty ControlID", i)
+				}
+				if rule.Title == "" {
+					t.Errorf("rule %d has empty Title", i)
+				}
 			}
 		})
 	}
@@ -77,9 +90,61 @@ func TestSelectorMatches(t *testing.T) {
 	t.Logf("Label selector matching tested via enrichment and rule matching tests")
 }
 
+// createTestEngine creates an engine with deterministic stub rules for testing
+// ANCHOR: Test-specific engine with stub rules - Phase 3.4 Week 3
+// Isolates tests from production rule changes by using known, immutable stub rules
+func createTestEngine() *Engine {
+	logger, _ := zap.NewProduction()
+	return &Engine{
+		Rules: []*Rule{
+			// Stub rules for testing - these are deterministic and won't change
+			{
+				ControlID:  "TEST_STUB_1",
+				Title:      "Test UID equals zero",
+				Severity:   "CRITICAL",
+				EventTypes: []string{"process_execution"},
+				Conditions: []Condition{
+					{
+						Field:    "process.uid",
+						Operator: "equals",
+						Value:    0,
+					},
+				},
+			},
+			{
+				ControlID:  "TEST_STUB_2",
+				Title:      "Test capability in list",
+				Severity:   "HIGH",
+				EventTypes: []string{"capability_usage"},
+				Conditions: []Condition{
+					{
+						Field:    "capability.name",
+						Operator: "in",
+						Value:    []string{"NET_ADMIN", "SYS_ADMIN"},
+					},
+				},
+			},
+			{
+				ControlID:  "TEST_STUB_3",
+				Title:      "Test role permission count",
+				Severity:   "MEDIUM",
+				EventTypes: []string{"pod_spec_check"},
+				Conditions: []Condition{
+					{
+						Field:    "kubernetes.role_permission_count",
+						Operator: "greater_than",
+						Value:    10,
+					},
+				},
+			},
+		},
+		Logger: logger,
+	}
+}
+
 // TestConditionEvaluation tests evaluation of different condition types
 func TestConditionEvaluation(t *testing.T) {
-	engine, _ := NewEngine()
+	engine := createTestEngine()
 
 	tests := []struct {
 		name      string
@@ -293,22 +358,22 @@ func TestConditionEvaluation(t *testing.T) {
 }
 
 // TestRuleMatching tests complete rule matching against events
+// ANCHOR: Rule matching tests with stub rules - Phase 3.4 Week 3
+// Uses deterministic stub rules independent of production CIS control definitions
 func TestRuleMatching(t *testing.T) {
-	engine, _ := NewEngine()
+	engine := createTestEngine()
 
 	tests := []struct {
-		name           string
-		event          *enrichment.EnrichedEvent
-		expectViolations bool
+		name              string
+		event             *enrichment.EnrichedEvent
+		expectViolations  bool
 		minViolationCount int // Minimum expected violations
+		expectedRuleID    string // Expected rule that triggers
 	}{
 		{
-			name: "Privileged container should trigger violation",
+			name: "Root process (UID 0) should trigger TEST_STUB_1",
 			event: &enrichment.EnrichedEvent{
 				EventType: "process_execution",
-				Container: &enrichment.ContainerContext{
-					Privileged: true,
-				},
 				Process: &enrichment.ProcessContext{
 					UID: 0,
 				},
@@ -316,25 +381,26 @@ func TestRuleMatching(t *testing.T) {
 					PodUID: "pod-123",
 				},
 			},
-			expectViolations: true,
-			minViolationCount: 1, // Should trigger CIS 4.5.1 or similar
+			expectViolations:  true,
+			minViolationCount: 1,
+			expectedRuleID:    "TEST_STUB_1",
 		},
 		{
-			name: "Root process should trigger violation",
+			name: "Non-root process should not trigger TEST_STUB_1",
 			event: &enrichment.EnrichedEvent{
 				EventType: "process_execution",
 				Process: &enrichment.ProcessContext{
-					UID: 0,
+					UID: 1000,
 				},
 				Kubernetes: &enrichment.K8sContext{
 					PodUID: "pod-456",
 				},
 			},
-			expectViolations: true,
-			minViolationCount: 1, // Should trigger CIS 4.5.2 or similar
+			expectViolations:  false,
+			minViolationCount: 0,
 		},
 		{
-			name: "Dangerous capability should trigger violation",
+			name: "Dangerous capability (SYS_ADMIN) should trigger TEST_STUB_2",
 			event: &enrichment.EnrichedEvent{
 				EventType: "capability_usage",
 				Capability: &enrichment.CapabilityContext{
@@ -344,8 +410,48 @@ func TestRuleMatching(t *testing.T) {
 					PodUID: "pod-789",
 				},
 			},
-			expectViolations: true,
+			expectViolations:  true,
 			minViolationCount: 1,
+			expectedRuleID:    "TEST_STUB_2",
+		},
+		{
+			name: "Safe capability should not trigger TEST_STUB_2",
+			event: &enrichment.EnrichedEvent{
+				EventType: "capability_usage",
+				Capability: &enrichment.CapabilityContext{
+					Name: "CAP_SETUID",
+				},
+				Kubernetes: &enrichment.K8sContext{
+					PodUID: "pod-safe",
+				},
+			},
+			expectViolations:  false,
+			minViolationCount: 0,
+		},
+		{
+			name: "High permission count should trigger TEST_STUB_3",
+			event: &enrichment.EnrichedEvent{
+				EventType: "pod_spec_check",
+				Kubernetes: &enrichment.K8sContext{
+					PodUID:              "pod-perms",
+					RolePermissionCount: 15,
+				},
+			},
+			expectViolations:  true,
+			minViolationCount: 1,
+			expectedRuleID:    "TEST_STUB_3",
+		},
+		{
+			name: "Low permission count should not trigger TEST_STUB_3",
+			event: &enrichment.EnrichedEvent{
+				EventType: "pod_spec_check",
+				Kubernetes: &enrichment.K8sContext{
+					PodUID:              "pod-safe-perms",
+					RolePermissionCount: 5,
+				},
+			},
+			expectViolations:  false,
+			minViolationCount: 0,
 		},
 	}
 
@@ -475,6 +581,8 @@ func TestExtractField(t *testing.T) {
 }
 
 // TestMultipleConditions tests rules with multiple conditions
+// ANCHOR: Multiple condition tests with stub rule - Phase 3.4 Week 3
+// Tests AND logic: all conditions must be satisfied for rule to match
 func TestMultipleConditions(t *testing.T) {
 	// Create a test rule with multiple conditions (all must match)
 	testRule := &Rule{
@@ -496,8 +604,11 @@ func TestMultipleConditions(t *testing.T) {
 		},
 	}
 
-	engine, _ := NewEngine()
-	engine.Rules = []*Rule{testRule}
+	logger, _ := zap.NewProduction()
+	engine := &Engine{
+		Rules:  []*Rule{testRule},
+		Logger: logger,
+	}
 
 	tests := []struct {
 		name          string
