@@ -337,6 +337,335 @@ func (c *Client) GetNodeMetadata(ctx context.Context, nodeName string) (*NodeMet
 	return metadata, nil
 }
 
+// GetServiceAccountMetadata retrieves ServiceAccount metadata for RBAC context
+// ANCHOR: ServiceAccount metadata query from K8s API - Phase 2.3, Dec 26, 2025
+// Retrieves automount settings and token age for RBAC enforcement evaluation
+func (c *Client) GetServiceAccountMetadata(ctx context.Context, namespace, saName string) (*ServiceAccountMetadata, error) {
+	if namespace == "" || saName == "" {
+		return nil, fmt.Errorf("namespace and service account name required")
+	}
+
+	// Query K8s API for ServiceAccount
+	sa, err := c.clientset.CoreV1().ServiceAccounts(namespace).Get(ctx, saName, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get service account %s/%s: %w", namespace, saName, err)
+	}
+
+	metadata := &ServiceAccountMetadata{
+		Name:                      sa.Name,
+		Namespace:                 sa.Namespace,
+		AutomountServiceAccountToken: true, // K8s default when not specified
+	}
+
+	// Check if automount is explicitly set
+	if sa.AutomountServiceAccountToken != nil {
+		metadata.AutomountServiceAccountToken = *sa.AutomountServiceAccountToken
+	}
+
+	// Get token age from secret if available
+	// Token is typically in a secret with the same SA name
+	if len(sa.Secrets) > 0 {
+		secretName := sa.Secrets[0].Name
+		secret, err := c.clientset.CoreV1().Secrets(namespace).Get(ctx, secretName, metav1.GetOptions{})
+		if err == nil {
+			// Token age is calculated from secret creation time
+			metadata.TokenCreatedAt = secret.ObjectMeta.CreationTimestamp.Unix()
+		}
+	}
+
+	return metadata, nil
+}
+
+// GetRBACLevel determines privilege escalation level for a service account
+// ANCHOR: RBAC privilege level evaluation - Phase 2.3, Dec 26, 2025
+// Returns 0=restricted, 1=standard, 2=elevated, 3=admin
+func (c *Client) GetRBACLevel(ctx context.Context, namespace, saName string) int {
+	if namespace == "" || saName == "" {
+		return 1 // Default to standard if not found
+	}
+
+	// Query all RoleBindings and ClusterRoleBindings for this service account
+	// Count permissions to determine level
+	permCount := 0
+
+	// Check RoleBindings in the namespace
+	rbs, err := c.clientset.RbacV1().RoleBindings(namespace).List(ctx, metav1.ListOptions{})
+	if err == nil {
+		for _, rb := range rbs.Items {
+			for _, subject := range rb.Subjects {
+				if subject.Kind == "ServiceAccount" && subject.Name == saName && subject.Namespace == namespace {
+					// Found a RoleBinding - this grants permissions
+					permCount++
+				}
+			}
+		}
+	}
+
+	// Check ClusterRoleBindings (cluster-wide)
+	crbs, err := c.clientset.RbacV1().ClusterRoleBindings().List(ctx, metav1.ListOptions{})
+	if err == nil {
+		for _, crb := range crbs.Items {
+			for _, subject := range crb.Subjects {
+				if subject.Kind == "ServiceAccount" && subject.Name == saName && subject.Namespace == namespace {
+					// ClusterRoleBindings grant elevated access
+					return 3 // Admin/cluster-wide
+				}
+			}
+		}
+	}
+
+	// Determine level based on permission count
+	if permCount == 0 {
+		return 0 // Restricted - no bindings
+	} else if permCount == 1 {
+		return 1 // Standard - single binding
+	} else {
+		return 2 // Elevated - multiple bindings
+	}
+}
+
+// CountRBACPermissions counts the total number of permissions granted via roles
+// ANCHOR: RBAC permission counting - Phase 2.3, Dec 26, 2025
+// Counts all verbs in all roles bound to the service account
+func (c *Client) CountRBACPermissions(ctx context.Context, namespace, saName string) int {
+	if namespace == "" || saName == "" {
+		return 0
+	}
+
+	totalPermissions := 0
+
+	// Check RoleBindings in the namespace
+	rbs, err := c.clientset.RbacV1().RoleBindings(namespace).List(ctx, metav1.ListOptions{})
+	if err == nil {
+		for _, rb := range rbs.Items {
+			for _, subject := range rb.Subjects {
+				if subject.Kind == "ServiceAccount" && subject.Name == saName && subject.Namespace == namespace {
+					// Get the Role
+					role, err := c.clientset.RbacV1().Roles(namespace).Get(ctx, rb.RoleRef.Name, metav1.GetOptions{})
+					if err == nil {
+						// Count permissions (verbs) in the role
+						for _, rule := range role.Rules {
+							totalPermissions += len(rule.Verbs)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Check ClusterRoleBindings
+	crbs, err := c.clientset.RbacV1().ClusterRoleBindings().List(ctx, metav1.ListOptions{})
+	if err == nil {
+		for _, crb := range crbs.Items {
+			for _, subject := range crb.Subjects {
+				if subject.Kind == "ServiceAccount" && subject.Name == saName && subject.Namespace == namespace {
+					// Get the ClusterRole
+					crole, err := c.clientset.RbacV1().ClusterRoles().Get(ctx, crb.RoleRef.Name, metav1.GetOptions{})
+					if err == nil {
+						// Count permissions (verbs) in the cluster role
+						for _, rule := range crole.Rules {
+							totalPermissions += len(rule.Verbs)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return totalPermissions
+}
+
+// GetNetworkPolicyStatus checks if network policies restrict ingress/egress for a pod
+// ANCHOR: Network policy evaluation for pod traffic restriction - Phase 2.4, Dec 26, 2025
+// Checks if NetworkPolicy objects restrict traffic to/from the pod
+func (c *Client) GetNetworkPolicyStatus(ctx context.Context, namespace, podName string, labels map[string]string) *NetworkPolicyStatus {
+	if namespace == "" {
+		return &NetworkPolicyStatus{
+			IngressRestricted:  false,
+			EgressRestricted:   false,
+			NamespaceIsolation: false,
+		}
+	}
+
+	status := &NetworkPolicyStatus{
+		IngressRestricted:  false,
+		EgressRestricted:   false,
+		NamespaceIsolation: false,
+	}
+
+	// Query all NetworkPolicies in the namespace
+	netpols, err := c.clientset.NetworkingV1().NetworkPolicies(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil || netpols == nil {
+		// No policies found or error - assume no restriction
+		return status
+	}
+
+	ingressPolicies := 0
+	egressPolicies := 0
+	defaultDenyIngress := false
+	defaultDenyEgress := false
+
+	for _, netpol := range netpols.Items {
+		// Check if this policy applies to this pod
+		// A policy applies if the pod's labels match the selector
+		selector := netpol.Spec.PodSelector
+		if selectorMatches(labels, selector) {
+			// Check policy types to see what it restricts
+			for _, policyType := range netpol.Spec.PolicyTypes {
+				if policyType == "Ingress" {
+					ingressPolicies++
+					// If it has no ingress rules, it's a default deny ingress
+					if len(netpol.Spec.Ingress) == 0 {
+						defaultDenyIngress = true
+					}
+				}
+				if policyType == "Egress" {
+					egressPolicies++
+					// If it has no egress rules, it's a default deny egress
+					if len(netpol.Spec.Egress) == 0 {
+						defaultDenyEgress = true
+					}
+				}
+			}
+		}
+	}
+
+	// Pod traffic is restricted if there are policies or default deny rules
+	status.IngressRestricted = ingressPolicies > 0 || defaultDenyIngress
+	status.EgressRestricted = egressPolicies > 0 || defaultDenyEgress
+
+	// Check for default-deny NetworkPolicy in the namespace (namespace-wide isolation)
+	// ANCHOR: Default-deny detection requires empty selector AND empty rule list - Phase 2.4 fix, Dec 27, 2025
+	// Empty selector alone doesn't guarantee isolation (policy could allow all traffic).
+	// True isolation requires empty rules for at least one policy type (deny all semantics).
+	for _, netpol := range netpols.Items {
+		// Default deny policy has empty pod selector (applies to all pods in namespace)
+		if len(netpol.Spec.PodSelector.MatchLabels) == 0 && len(netpol.Spec.PodSelector.MatchExpressions) == 0 {
+			// Empty selector - check if it actually denies traffic (empty rule list)
+			for _, policyType := range netpol.Spec.PolicyTypes {
+				if policyType == "Ingress" && len(netpol.Spec.Ingress) == 0 {
+					// Empty ingress rules = deny all ingress traffic
+					status.NamespaceIsolation = true
+					break
+				}
+				if policyType == "Egress" && len(netpol.Spec.Egress) == 0 {
+					// Empty egress rules = deny all egress traffic
+					status.NamespaceIsolation = true
+					break
+				}
+			}
+			if status.NamespaceIsolation {
+				break
+			}
+		}
+	}
+
+	return status
+}
+
+// selectorMatches checks if pod labels match a label selector
+// ANCHOR: Label selector matching with MatchExpressions support - Phase 2.4 fix, Dec 26, 2025
+// Returns true if pod labels match all requirements in the selector (both MatchLabels and MatchExpressions)
+// Empty selector (no MatchLabels and no MatchExpressions) matches all pods
+func selectorMatches(labels map[string]string, selector metav1.LabelSelector) bool {
+	if labels == nil {
+		labels = make(map[string]string)
+	}
+
+	// Empty selector (no MatchLabels and no MatchExpressions) matches all pods
+	if len(selector.MatchLabels) == 0 && len(selector.MatchExpressions) == 0 {
+		return true
+	}
+
+	// Check label-based requirements (MatchLabels)
+	for key, value := range selector.MatchLabels {
+		if labels[key] != value {
+			return false
+		}
+	}
+
+	// Check expression-based requirements (MatchExpressions)
+	// Each expression must be satisfied for the match to succeed
+	for _, expr := range selector.MatchExpressions {
+		labelValue, labelExists := labels[expr.Key]
+
+		switch expr.Operator {
+		case metav1.LabelSelectorOpIn:
+			// Label value must be in the values list
+			found := false
+			for _, v := range expr.Values {
+				if labelValue == v {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return false
+			}
+
+		case metav1.LabelSelectorOpNotIn:
+			// Label value must NOT be in the values list
+			if labelExists {
+				for _, v := range expr.Values {
+					if labelValue == v {
+						return false
+					}
+				}
+			}
+
+		case metav1.LabelSelectorOpExists:
+			// Label key must exist
+			if !labelExists {
+				return false
+			}
+
+		case metav1.LabelSelectorOpDoesNotExist:
+			// Label key must NOT exist
+			if labelExists {
+				return false
+			}
+		}
+	}
+
+	return true
+}
+
+// CheckNamespaceDefaultDenyPolicy checks if namespace has default deny NetworkPolicies
+// ANCHOR: Namespace isolation policy check - Phase 2.4, Dec 26, 2025
+// Returns true if the namespace has a default deny network policy
+func (c *Client) CheckNamespaceDefaultDenyPolicy(ctx context.Context, namespace string) bool {
+	if namespace == "" {
+		return false
+	}
+
+	netpols, err := c.clientset.NetworkingV1().NetworkPolicies(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil || netpols == nil {
+		return false
+	}
+
+	// ANCHOR: Default-deny detection requires empty selector AND empty rule list - Phase 2.4 fix, Dec 27, 2025
+	// Empty selector alone doesn't guarantee isolation (policy could allow all traffic).
+	// True isolation requires empty rules for at least one policy type (deny all semantics).
+	for _, netpol := range netpols.Items {
+		// Check if this is a default deny policy (empty pod selector + empty rules)
+		if len(netpol.Spec.PodSelector.MatchLabels) == 0 && len(netpol.Spec.PodSelector.MatchExpressions) == 0 {
+			// Empty selector - check if it actually denies traffic (empty rule list)
+			for _, policyType := range netpol.Spec.PolicyTypes {
+				if policyType == "Ingress" && len(netpol.Spec.Ingress) == 0 {
+					// Empty ingress rules = deny all ingress traffic
+					return true
+				}
+				if policyType == "Egress" && len(netpol.Spec.Egress) == 0 {
+					// Empty egress rules = deny all egress traffic
+					return true
+				}
+			}
+		}
+	}
+
+	return false
+}
+
 // Data structures for Kubernetes metadata
 // ANCHOR: PodMetadata and NodeMetadata types used by enrichment - Phase 2.2, Dec 26, 2025
 // These types are defined in the kubernetes package to avoid circular imports.
@@ -395,4 +724,23 @@ type NodeMetadata struct {
 	Labels   map[string]string
 	Taints   []string
 	Capacity map[string]string
+}
+
+// ServiceAccountMetadata contains RBAC and token information
+// ANCHOR: ServiceAccount metadata for RBAC enforcement - Phase 2.3, Dec 26, 2025
+// Extracted from ServiceAccount and Token Secret objects for compliance evaluation
+type ServiceAccountMetadata struct {
+	Name                         string
+	Namespace                    string
+	AutomountServiceAccountToken bool
+	TokenCreatedAt               int64 // Unix timestamp
+}
+
+// NetworkPolicyStatus contains network policy restrictions for a pod
+// ANCHOR: Network policy status for traffic restriction evaluation - Phase 2.4, Dec 26, 2025
+// Evaluated from NetworkPolicy objects that apply to the pod
+type NetworkPolicyStatus struct {
+	IngressRestricted  bool // True if NetworkPolicy restricts ingress traffic
+	EgressRestricted   bool // True if NetworkPolicy restricts egress traffic
+	NamespaceIsolation bool // True if namespace has default deny policies
 }

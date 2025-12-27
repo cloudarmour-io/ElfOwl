@@ -154,6 +154,29 @@ func (e *Enricher) EnrichProcessEvent(
 		k8sCtx.ImageRegistry = e.parseImageRegistry(podMeta.Image)
 		k8sCtx.ImageTag = e.parseImageTag(podMeta.Image)
 		k8sCtx.Labels = podMeta.Labels
+
+		// ANCHOR: Extract RBAC context from ServiceAccount and Role bindings - Phase 2.3, Dec 26, 2025
+		// Query RBAC metadata only if K8s client is available and service account is set
+		if e.K8sClient != nil && podMeta.ServiceAccount != "" {
+			// Get ServiceAccount metadata
+			saMeta, err := e.K8sClient.GetServiceAccountMetadata(ctx, podMeta.Namespace, podMeta.ServiceAccount)
+			if err == nil && saMeta != nil {
+				k8sCtx.AutomountServiceAccountToken = saMeta.AutomountServiceAccountToken
+				// Calculate token age (current time - token creation time)
+				if saMeta.TokenCreatedAt > 0 {
+					k8sCtx.ServiceAccountTokenAge = time.Now().Unix() - saMeta.TokenCreatedAt
+				}
+			}
+
+			// Get RBAC privilege level (0=restricted, 1=standard, 2=elevated, 3=admin)
+			k8sCtx.RBACLevel = e.K8sClient.GetRBACLevel(ctx, podMeta.Namespace, podMeta.ServiceAccount)
+			k8sCtx.RBACEnforced = k8sCtx.RBACLevel >= 0 // Always true if we got a result
+
+			// Count permission grants
+			k8sCtx.ServiceAccountPermissions = e.K8sClient.CountRBACPermissions(ctx, podMeta.Namespace, podMeta.ServiceAccount)
+			k8sCtx.RBACPolicyDefined = k8sCtx.ServiceAccountPermissions > 0
+			k8sCtx.RolePermissionCount = k8sCtx.ServiceAccountPermissions
+		}
 	}
 
 	// Build container context with security context from pod spec or defaults
@@ -255,18 +278,31 @@ func (e *Enricher) EnrichNetworkEvent(
 		k8sCtx.Labels = podMeta.Labels
 	}
 
-	// Build network context with policy defaults
-	// ANCHOR: Network policy defaults for Phase 2 - Dec 26, 2025
-	// Assumes no network policies in place by default; Phase 3 will query actual policies
+	// Build network context with policy evaluation
+	// ANCHOR: Network policy evaluation from K8s API - Phase 2.4, Dec 26, 2025
+	// Query NetworkPolicy objects to determine traffic restrictions
 	networkCtx := &NetworkContext{
 		SourceIP:             gobpfEvent.SrcAddr,
 		DestinationIP:        gobpfEvent.DstAddr,
 		SourcePort:           gobpfEvent.SrcPort,
 		DestinationPort:      gobpfEvent.DstPort,
 		Protocol:             gobpfEvent.Protocol.String(),
-		IngressRestricted:    false, // Assume no ingress policies by default
-		EgressRestricted:     false, // Assume no egress policies by default
-		NamespaceIsolation:   false, // Assume no isolation by default
+		IngressRestricted:    false,
+		EgressRestricted:     false,
+		NamespaceIsolation:   false,
+	}
+
+	// Query network policies if pod metadata is available
+	if podMeta != nil && e.K8sClient != nil {
+		npStatus := e.K8sClient.GetNetworkPolicyStatus(ctx, podMeta.Namespace, podMeta.Name, podMeta.Labels)
+		if npStatus != nil {
+			networkCtx.IngressRestricted = npStatus.IngressRestricted
+			networkCtx.EgressRestricted = npStatus.EgressRestricted
+			networkCtx.NamespaceIsolation = npStatus.NamespaceIsolation
+		}
+	} else if k8sCtx.Namespace != "" && e.K8sClient != nil {
+		// Fallback: check namespace-wide default deny if we know the namespace
+		networkCtx.NamespaceIsolation = e.K8sClient.CheckNamespaceDefaultDenyPolicy(ctx, k8sCtx.Namespace)
 	}
 
 	return &EnrichedEvent{
