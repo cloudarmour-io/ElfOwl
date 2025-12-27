@@ -99,30 +99,24 @@ func TestIntegrationPrivilegedContainer(t *testing.T) {
 	t.Logf("Privileged container test: detected %d violations", len(violations))
 }
 
-// TestIntegrationNetworkPolicyViolation tests detection of network policy violations (CIS 5.1)
+// TestIntegrationNetworkPolicyViolation tests detection of network policy violations (CIS 4.6.1)
 // ANCHOR: Network policy violation detection - Phase 3.5 Week 3
-// CIS 5.1: Network policies should be defined
+// CIS 4.6.1: Ensure default deny NetworkPolicy is in place
 func TestIntegrationNetworkPolicyViolation(t *testing.T) {
 	engine, _ := NewEngine()
 
+	// network_policy_check event with no default deny policy in place
 	event := &enrichment.EnrichedEvent{
-		EventType: "network_traffic",
-		Network: &enrichment.NetworkContext{
-			Protocol:        "TCP",
-			SourceIP:        "10.0.0.50",
-			SourcePort:      54321,
-			DestinationIP:   "10.0.0.100",
-			DestinationPort: 443,
-			Direction:       "egress",
-		},
+		EventType: "network_policy_check", // Correct event type for CIS_4.6.1
 		Kubernetes: &enrichment.K8sContext{
-			ClusterID:      "test-cluster",
-			NodeName:       "node-2",
-			Namespace:      "default",
-			PodName:        "web-pod",
-			PodUID:         "pod-789",
-			ServiceAccount: "web-app",
-			Labels:         map[string]string{"tier": "web"},
+			ClusterID:                      "test-cluster",
+			NodeName:                       "node-2",
+			Namespace:                      "default",
+			PodName:                        "web-pod",
+			PodUID:                         "pod-789",
+			ServiceAccount:                 "web-app",
+			HasDefaultDenyNetworkPolicy:    false, // Violation: no default deny policy
+			Labels:                         map[string]string{"tier": "web"},
 		},
 		Container: &enrichment.ContainerContext{
 			ContainerID: "xyz789abc123",
@@ -133,23 +127,30 @@ func TestIntegrationNetworkPolicyViolation(t *testing.T) {
 
 	violations := engine.Match(event)
 
-	// May or may not detect violations depending on rules
+	// CIS_4.6.1 detects when default deny NetworkPolicy is missing
+	if len(violations) == 0 {
+		t.Errorf("expected violations for missing default deny NetworkPolicy, got none")
+	}
+
 	t.Logf("Network policy test: detected %d violations", len(violations))
 }
 
 // TestIntegrationRBACViolation tests detection of RBAC violations (CIS 5.2)
 // ANCHOR: RBAC violation detection - Phase 3.5 Week 3
 // CIS 5.2: Minimize access to create deployments
+// NOTE: RBAC violations are detected via service account analysis, not specific events
+// This test documents that RBAC is enriched but rules are pod-spec-triggered
 func TestIntegrationRBACViolation(t *testing.T) {
 	engine, _ := NewEngine()
 
+	// RBAC violations are detected when default service account is used
 	event := &enrichment.EnrichedEvent{
-		EventType: "api_audit",
+		EventType: "pod_spec_check",
 		Kubernetes: &enrichment.K8sContext{
 			ClusterID:      "test-cluster",
 			NodeName:       "node-1",
 			Namespace:      "default",
-			ServiceAccount: "audit-user",
+			ServiceAccount: "default", // Using default service account triggers CIS_4.1.1
 			Labels:         map[string]string{"user": "attacker"},
 		},
 		Timestamp: time.Now(),
@@ -157,19 +158,23 @@ func TestIntegrationRBACViolation(t *testing.T) {
 
 	violations := engine.Match(event)
 
+	if len(violations) == 0 {
+		t.Errorf("expected violations for default service account usage, got none")
+	}
+
 	t.Logf("RBAC violation test: detected %d violations", len(violations))
 }
 
-// TestIntegrationCapabilityViolation tests detection of dangerous Linux capabilities (CIS 4.1.10)
+// TestIntegrationCapabilityViolation tests detection of dangerous Linux capabilities (CIS 4.5.3)
 // ANCHOR: Linux capability violation detection - Phase 3.5 Week 3
-// CIS 4.1.10: Ensure containers do not use CAP_SYS_ADMIN capability
+// CIS 4.5.3: Minimize Linux Kernel Capability usage
 func TestIntegrationCapabilityViolation(t *testing.T) {
 	engine, _ := NewEngine()
 
 	event := &enrichment.EnrichedEvent{
-		EventType: "capability_use",
+		EventType: "capability_usage", // Correct event type from cis_mappings.go
 		Capability: &enrichment.CapabilityContext{
-			Name:    "CAP_SYS_ADMIN",
+			Name:    "SYS_ADMIN", // Must match rule condition (no CAP_ prefix in rules)
 			Allowed: true,
 			UID:     1000,
 		},
@@ -183,6 +188,7 @@ func TestIntegrationCapabilityViolation(t *testing.T) {
 			NodeName:       "node-3",
 			Namespace:      "default",
 			PodName:        "privileged-workload",
+			PodUID:         "pod-cap",
 			ServiceAccount: "app-sa",
 			Labels:         map[string]string{"workload": "system"},
 		},
@@ -195,24 +201,26 @@ func TestIntegrationCapabilityViolation(t *testing.T) {
 
 	violations := engine.Match(event)
 
+	// CIS_4.5.3 detects dangerous capabilities like CAP_SYS_ADMIN
 	if len(violations) == 0 {
-		t.Logf("warning: expected violations for dangerous capability, got none")
-	} else {
-		t.Logf("Capability violation test: detected %d violations", len(violations))
+		t.Errorf("expected violations for dangerous capability CAP_SYS_ADMIN, got none")
 	}
+
+	t.Logf("Capability violation test: detected %d violations", len(violations))
 }
 
-// TestIntegrationFileAccessViolation tests detection of dangerous file access (CIS 4.4)
-// ANCHOR: File access violation detection - Phase 3.5 Week 3
-// CIS 4.4: Ensure container does not mount host directory with HostPath volume
+// TestIntegrationFileAccessViolation tests detection of dangerous file access (CIS 4.5.5)
+// ANCHOR: File write violation detection - Phase 3.5 Week 3
+// CIS 4.5.5: Ensure the filesystem is read-only where possible
+// Tests detection of writes to system directories (/etc, /bin, etc.)
 func TestIntegrationFileAccessViolation(t *testing.T) {
 	engine, _ := NewEngine()
 
 	event := &enrichment.EnrichedEvent{
-		EventType: "file_access",
+		EventType: "file_write", // Correct event type - matches CIS_4.5.5
 		File: &enrichment.FileContext{
-			Path:      "/etc/passwd",
-			Operation: "read",
+			Path:      "/etc/passwd", // System directory write (violation)
+			Operation: "write",
 			UID:       0,
 		},
 		Process: &enrichment.ProcessContext{
@@ -225,6 +233,7 @@ func TestIntegrationFileAccessViolation(t *testing.T) {
 			NodeName:       "node-1",
 			Namespace:      "default",
 			PodName:        "config-pod",
+			PodUID:         "pod-config",
 			ServiceAccount: "reader-sa",
 			Labels:         map[string]string{"type": "config"},
 		},
@@ -237,22 +246,28 @@ func TestIntegrationFileAccessViolation(t *testing.T) {
 
 	violations := engine.Match(event)
 
-	t.Logf("File access violation test: detected %d violations", len(violations))
+	// CIS_4.5.5 detects writes to system directories
+	if len(violations) == 0 {
+		t.Errorf("expected violations for write to /etc/passwd (system directory), got none")
+	}
+
+	t.Logf("File write violation test: detected %d violations", len(violations))
 }
 
-// TestIntegrationDNSExfiltration tests detection of DNS exfiltration attempts
+// TestIntegrationDNSExfiltration tests detection of DNS exfiltration attempts (CIS 4.6.4)
 // ANCHOR: DNS exfiltration detection - Phase 3.5 Week 3
-// Tests detection of suspicious DNS queries (potential data exfiltration)
+// CIS 4.6.4: Ensure DNS queries are restricted to allowed domains
 func TestIntegrationDNSExfiltration(t *testing.T) {
 	engine, _ := NewEngine()
 
+	// dns_query event with query not allowed (disallowed domain)
 	event := &enrichment.EnrichedEvent{
-		EventType: "dns_query",
+		EventType: "dns_query", // Correct event type for CIS_4.6.4
 		DNS: &enrichment.DNSContext{
-			QueryName:    "exfil.attacker.com",
+			QueryName:    "exfil.attacker.com", // Suspicious exfiltration domain
 			QueryType:    "A",
 			ResponseCode: 0, // NOERROR
-			QueryAllowed: true,
+			QueryAllowed: false, // Violation: query not allowed
 		},
 		Network: &enrichment.NetworkContext{
 			Protocol:        "UDP",
@@ -272,6 +287,7 @@ func TestIntegrationDNSExfiltration(t *testing.T) {
 			NodeName:       "node-2",
 			Namespace:      "default",
 			PodName:        "web-app",
+			PodUID:         "pod-web",
 			ServiceAccount: "web-sa",
 			Labels:         map[string]string{"app": "web"},
 		},
@@ -283,6 +299,11 @@ func TestIntegrationDNSExfiltration(t *testing.T) {
 	}
 
 	violations := engine.Match(event)
+
+	// CIS_4.6.4 detects DNS queries to disallowed domains
+	if len(violations) == 0 {
+		t.Errorf("expected violations for disallowed DNS query to attacker domain, got none")
+	}
 
 	t.Logf("DNS exfiltration test: detected %d violations", len(violations))
 }
@@ -297,17 +318,17 @@ func TestIntegrationMultipleViolationsInSingleEvent(t *testing.T) {
 	event := &enrichment.EnrichedEvent{
 		EventType: "pod_spec_check",
 		Process: &enrichment.ProcessContext{
-			UID:      0, // Root (violation)
+			UID:      0, // Root (violation for process_execution event type)
 			Command:  "malicious",
 			Filename: "/malicious/app",
 		},
 		Container: &enrichment.ContainerContext{
 			ContainerID:             "multi123xyz",
 			Runtime:                 "docker",
-			Privileged:              true,        // Privileged (violation)
-			RunAsRoot:               true,        // Run as root (violation)
-			AllowPrivilegeEscalation: true,       // Allow privilege escalation (violation)
-			ReadOnlyFilesystem:      false,       // Not read-only (violation)
+			Privileged:              true,        // Violates CIS_4.5.1
+			RunAsRoot:               true,        // Violates CIS_4.5.2 (when process_execution type)
+			AllowPrivilegeEscalation: true,       // Violates related security controls
+			ReadOnlyFilesystem:      false,       // Violates CIS_4.5.5 (requires file_write event)
 		},
 		Kubernetes: &enrichment.K8sContext{
 			ClusterID:      "test-cluster",
@@ -315,11 +336,11 @@ func TestIntegrationMultipleViolationsInSingleEvent(t *testing.T) {
 			Namespace:      "default",
 			PodName:        "bad-pod",
 			PodUID:         "pod-bad",
-			ServiceAccount: "default",
+			ServiceAccount: "default", // Violates CIS_4.1.1
 			Labels:         map[string]string{"suspicious": "true"},
 		},
 		Capability: &enrichment.CapabilityContext{
-			Name:    "CAP_SYS_ADMIN", // Dangerous capability (violation)
+			Name:    "SYS_ADMIN", // Dangerous capability (requires capability_usage event type, no CAP_ prefix)
 			Allowed: true,
 		},
 		Timestamp: time.Now(),
@@ -327,14 +348,15 @@ func TestIntegrationMultipleViolationsInSingleEvent(t *testing.T) {
 
 	violations := engine.Match(event)
 
-	// Expect multiple violations
-	if len(violations) > 0 {
-		t.Logf("Multiple violations test: detected %d violations", len(violations))
-		for i, v := range violations {
-			t.Logf("  Violation %d: %s (%s severity)", i+1, v.ControlID, v.Severity)
-		}
-	} else {
-		t.Logf("warning: expected multiple violations, got none")
+	// This event type matches pod_spec_check rules: CIS_4.5.1 (privileged), CIS_4.1.1 (default SA)
+	// It should trigger at least 2 violations
+	if len(violations) < 2 {
+		t.Errorf("expected at least 2 violations (privileged container + default ServiceAccount), got %d", len(violations))
+	}
+
+	t.Logf("Multiple violations test: detected %d violations", len(violations))
+	for i, v := range violations {
+		t.Logf("  Violation %d: %s (%s severity)", i+1, v.ControlID, v.Severity)
 	}
 }
 
