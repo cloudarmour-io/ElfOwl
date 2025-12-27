@@ -154,6 +154,29 @@ func (e *Enricher) EnrichProcessEvent(
 		k8sCtx.ImageRegistry = e.parseImageRegistry(podMeta.Image)
 		k8sCtx.ImageTag = e.parseImageTag(podMeta.Image)
 		k8sCtx.Labels = podMeta.Labels
+
+		// ANCHOR: Extract RBAC context from ServiceAccount and Role bindings - Phase 2.3, Dec 26, 2025
+		// Query RBAC metadata only if K8s client is available and service account is set
+		if e.K8sClient != nil && podMeta.ServiceAccount != "" {
+			// Get ServiceAccount metadata
+			saMeta, err := e.K8sClient.GetServiceAccountMetadata(ctx, podMeta.Namespace, podMeta.ServiceAccount)
+			if err == nil && saMeta != nil {
+				k8sCtx.AutomountServiceAccountToken = saMeta.AutomountServiceAccountToken
+				// Calculate token age (current time - token creation time)
+				if saMeta.TokenCreatedAt > 0 {
+					k8sCtx.ServiceAccountTokenAge = time.Now().Unix() - saMeta.TokenCreatedAt
+				}
+			}
+
+			// Get RBAC privilege level (0=restricted, 1=standard, 2=elevated, 3=admin)
+			k8sCtx.RBACLevel = e.K8sClient.GetRBACLevel(ctx, podMeta.Namespace, podMeta.ServiceAccount)
+			k8sCtx.RBACEnforced = k8sCtx.RBACLevel >= 0 // Always true if we got a result
+
+			// Count permission grants
+			k8sCtx.ServiceAccountPermissions = e.K8sClient.CountRBACPermissions(ctx, podMeta.Namespace, podMeta.ServiceAccount)
+			k8sCtx.RBACPolicyDefined = k8sCtx.ServiceAccountPermissions > 0
+			k8sCtx.RolePermissionCount = k8sCtx.ServiceAccountPermissions
+		}
 	}
 
 	// Build container context with security context from pod spec or defaults

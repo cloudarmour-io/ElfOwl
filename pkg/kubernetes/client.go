@@ -337,6 +337,144 @@ func (c *Client) GetNodeMetadata(ctx context.Context, nodeName string) (*NodeMet
 	return metadata, nil
 }
 
+// GetServiceAccountMetadata retrieves ServiceAccount metadata for RBAC context
+// ANCHOR: ServiceAccount metadata query from K8s API - Phase 2.3, Dec 26, 2025
+// Retrieves automount settings and token age for RBAC enforcement evaluation
+func (c *Client) GetServiceAccountMetadata(ctx context.Context, namespace, saName string) (*ServiceAccountMetadata, error) {
+	if namespace == "" || saName == "" {
+		return nil, fmt.Errorf("namespace and service account name required")
+	}
+
+	// Query K8s API for ServiceAccount
+	sa, err := c.clientset.CoreV1().ServiceAccounts(namespace).Get(ctx, saName, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get service account %s/%s: %w", namespace, saName, err)
+	}
+
+	metadata := &ServiceAccountMetadata{
+		Name:                      sa.Name,
+		Namespace:                 sa.Namespace,
+		AutomountServiceAccountToken: true, // K8s default when not specified
+	}
+
+	// Check if automount is explicitly set
+	if sa.AutomountServiceAccountToken != nil {
+		metadata.AutomountServiceAccountToken = *sa.AutomountServiceAccountToken
+	}
+
+	// Get token age from secret if available
+	// Token is typically in a secret with the same SA name
+	if len(sa.Secrets) > 0 {
+		secretName := sa.Secrets[0].Name
+		secret, err := c.clientset.CoreV1().Secrets(namespace).Get(ctx, secretName, metav1.GetOptions{})
+		if err == nil {
+			// Token age is calculated from secret creation time
+			metadata.TokenCreatedAt = secret.ObjectMeta.CreationTimestamp.Unix()
+		}
+	}
+
+	return metadata, nil
+}
+
+// GetRBACLevel determines privilege escalation level for a service account
+// ANCHOR: RBAC privilege level evaluation - Phase 2.3, Dec 26, 2025
+// Returns 0=restricted, 1=standard, 2=elevated, 3=admin
+func (c *Client) GetRBACLevel(ctx context.Context, namespace, saName string) int {
+	if namespace == "" || saName == "" {
+		return 1 // Default to standard if not found
+	}
+
+	// Query all RoleBindings and ClusterRoleBindings for this service account
+	// Count permissions to determine level
+	permCount := 0
+
+	// Check RoleBindings in the namespace
+	rbs, err := c.clientset.RbacV1().RoleBindings(namespace).List(ctx, metav1.ListOptions{})
+	if err == nil {
+		for _, rb := range rbs.Items {
+			for _, subject := range rb.Subjects {
+				if subject.Kind == "ServiceAccount" && subject.Name == saName && subject.Namespace == namespace {
+					// Found a RoleBinding - this grants permissions
+					permCount++
+				}
+			}
+		}
+	}
+
+	// Check ClusterRoleBindings (cluster-wide)
+	crbs, err := c.clientset.RbacV1().ClusterRoleBindings().List(ctx, metav1.ListOptions{})
+	if err == nil {
+		for _, crb := range crbs.Items {
+			for _, subject := range crb.Subjects {
+				if subject.Kind == "ServiceAccount" && subject.Name == saName && subject.Namespace == namespace {
+					// ClusterRoleBindings grant elevated access
+					return 3 // Admin/cluster-wide
+				}
+			}
+		}
+	}
+
+	// Determine level based on permission count
+	if permCount == 0 {
+		return 0 // Restricted - no bindings
+	} else if permCount == 1 {
+		return 1 // Standard - single binding
+	} else {
+		return 2 // Elevated - multiple bindings
+	}
+}
+
+// CountRBACPermissions counts the total number of permissions granted via roles
+// ANCHOR: RBAC permission counting - Phase 2.3, Dec 26, 2025
+// Counts all verbs in all roles bound to the service account
+func (c *Client) CountRBACPermissions(ctx context.Context, namespace, saName string) int {
+	if namespace == "" || saName == "" {
+		return 0
+	}
+
+	totalPermissions := 0
+
+	// Check RoleBindings in the namespace
+	rbs, err := c.clientset.RbacV1().RoleBindings(namespace).List(ctx, metav1.ListOptions{})
+	if err == nil {
+		for _, rb := range rbs.Items {
+			for _, subject := range rb.Subjects {
+				if subject.Kind == "ServiceAccount" && subject.Name == saName && subject.Namespace == namespace {
+					// Get the Role
+					role, err := c.clientset.RbacV1().Roles(namespace).Get(ctx, rb.RoleRef.Name, metav1.GetOptions{})
+					if err == nil {
+						// Count permissions (verbs) in the role
+						for _, rule := range role.Rules {
+							totalPermissions += len(rule.Verbs)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Check ClusterRoleBindings
+	crbs, err := c.clientset.RbacV1().ClusterRoleBindings().List(ctx, metav1.ListOptions{})
+	if err == nil {
+		for _, crb := range crbs.Items {
+			for _, subject := range crb.Subjects {
+				if subject.Kind == "ServiceAccount" && subject.Name == saName && subject.Namespace == namespace {
+					// Get the ClusterRole
+					crole, err := c.clientset.RbacV1().ClusterRoles().Get(ctx, crb.RoleRef.Name, metav1.GetOptions{})
+					if err == nil {
+						// Count permissions (verbs) in the cluster role
+						for _, rule := range crole.Rules {
+							totalPermissions += len(rule.Verbs)
+						}
+					}
+				}
+			}
+		}
+	}
+
+	return totalPermissions
+}
+
 // Data structures for Kubernetes metadata
 // ANCHOR: PodMetadata and NodeMetadata types used by enrichment - Phase 2.2, Dec 26, 2025
 // These types are defined in the kubernetes package to avoid circular imports.
@@ -395,4 +533,14 @@ type NodeMetadata struct {
 	Labels   map[string]string
 	Taints   []string
 	Capacity map[string]string
+}
+
+// ServiceAccountMetadata contains RBAC and token information
+// ANCHOR: ServiceAccount metadata for RBAC enforcement - Phase 2.3, Dec 26, 2025
+// Extracted from ServiceAccount and Token Secret objects for compliance evaluation
+type ServiceAccountMetadata struct {
+	Name                         string
+	Namespace                    string
+	AutomountServiceAccountToken bool
+	TokenCreatedAt               int64 // Unix timestamp
 }
