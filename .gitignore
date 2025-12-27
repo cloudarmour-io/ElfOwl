@@ -42,6 +42,7 @@ Thumbs.db
 
 # Go binaries
 main
+elf-owl
 *.out
 cmd/*/cmd
 

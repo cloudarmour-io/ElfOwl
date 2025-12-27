@@ -535,14 +535,28 @@ func (c *Client) GetNetworkPolicyStatus(ctx context.Context, namespace, podName 
 	status.EgressRestricted = egressPolicies > 0 || defaultDenyEgress
 
 	// Check for default-deny NetworkPolicy in the namespace (namespace-wide isolation)
-	// ANCHOR: Empty selector check for default deny policies - Phase 2.4 fix, Dec 26, 2025
-	// Empty selector (both MatchLabels and MatchExpressions) means policy applies to all pods
+	// ANCHOR: Default-deny detection requires empty selector AND empty rule list - Phase 2.4 fix, Dec 27, 2025
+	// Empty selector alone doesn't guarantee isolation (policy could allow all traffic).
+	// True isolation requires empty rules for at least one policy type (deny all semantics).
 	for _, netpol := range netpols.Items {
 		// Default deny policy has empty pod selector (applies to all pods in namespace)
 		if len(netpol.Spec.PodSelector.MatchLabels) == 0 && len(netpol.Spec.PodSelector.MatchExpressions) == 0 {
-			// This is a default deny policy - namespace isolation is enabled
-			status.NamespaceIsolation = true
-			break
+			// Empty selector - check if it actually denies traffic (empty rule list)
+			for _, policyType := range netpol.Spec.PolicyTypes {
+				if policyType == "Ingress" && len(netpol.Spec.Ingress) == 0 {
+					// Empty ingress rules = deny all ingress traffic
+					status.NamespaceIsolation = true
+					break
+				}
+				if policyType == "Egress" && len(netpol.Spec.Egress) == 0 {
+					// Empty egress rules = deny all egress traffic
+					status.NamespaceIsolation = true
+					break
+				}
+			}
+			if status.NamespaceIsolation {
+				break
+			}
 		}
 	}
 
@@ -629,12 +643,23 @@ func (c *Client) CheckNamespaceDefaultDenyPolicy(ctx context.Context, namespace 
 		return false
 	}
 
-	// ANCHOR: Empty selector check for namespace default deny - Phase 2.4 fix, Dec 26, 2025
-	// Empty selector (both MatchLabels and MatchExpressions) means policy applies to all pods
+	// ANCHOR: Default-deny detection requires empty selector AND empty rule list - Phase 2.4 fix, Dec 27, 2025
+	// Empty selector alone doesn't guarantee isolation (policy could allow all traffic).
+	// True isolation requires empty rules for at least one policy type (deny all semantics).
 	for _, netpol := range netpols.Items {
-		// Check if this is a default deny policy (empty pod selector)
+		// Check if this is a default deny policy (empty pod selector + empty rules)
 		if len(netpol.Spec.PodSelector.MatchLabels) == 0 && len(netpol.Spec.PodSelector.MatchExpressions) == 0 {
-			return true
+			// Empty selector - check if it actually denies traffic (empty rule list)
+			for _, policyType := range netpol.Spec.PolicyTypes {
+				if policyType == "Ingress" && len(netpol.Spec.Ingress) == 0 {
+					// Empty ingress rules = deny all ingress traffic
+					return true
+				}
+				if policyType == "Egress" && len(netpol.Spec.Egress) == 0 {
+					// Empty egress rules = deny all egress traffic
+					return true
+				}
+			}
 		}
 	}
 
