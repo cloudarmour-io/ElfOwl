@@ -4,6 +4,7 @@
 package ebpf
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -17,10 +18,10 @@ import (
 )
 
 // ProcessMonitor monitors process execution via eBPF tracepoint
-// Streams ProcessExecution events from kernel to enrichment pipeline
+// Streams enriched events with ProcessContext to enrichment pipeline
 type ProcessMonitor struct {
 	programSet *ProgramSet
-	eventChan  chan *enrichment.ProcessExecution
+	eventChan  chan *enrichment.EnrichedEvent
 	logger     *zap.Logger
 	stopChan   chan struct{}
 	wg         sync.WaitGroup
@@ -32,7 +33,7 @@ type ProcessMonitor struct {
 func NewProcessMonitor(programSet *ProgramSet, logger *zap.Logger) *ProcessMonitor {
 	return &ProcessMonitor{
 		programSet: programSet,
-		eventChan:  make(chan *enrichment.ProcessExecution, 100),
+		eventChan:  make(chan *enrichment.EnrichedEvent, 100),
 		logger:     logger,
 		stopChan:   make(chan struct{}),
 	}
@@ -74,8 +75,8 @@ func (pm *ProcessMonitor) eventLoop(ctx context.Context) {
 		default:
 			// ANCHOR: Read process event from kernel - Dec 27, 2025
 			// Reads raw event bytes from perf/ringbuf reader
-			// Parses into ProcessEvent struct
-			// Converts to enrichment.ProcessExecution for pipeline
+			// Parses into ProcessEvent struct using bytes.NewReader
+			// Converts to enrichment.EnrichedEvent with ProcessContext
 
 			if pm.programSet.Reader == nil {
 				time.Sleep(100 * time.Millisecond)
@@ -97,48 +98,51 @@ func (pm *ProcessMonitor) eventLoop(ctx context.Context) {
 
 			// Parse raw bytes to ProcessEvent struct
 			evt := &ProcessEvent{}
-			if err := binary.Read(strings.NewReader(""), binary.LittleEndian, evt); err != nil {
+			if err := binary.Read(bytes.NewReader(data), binary.LittleEndian, evt); err != nil {
 				pm.logger.Warn("parse event failed",
 					zap.Error(err))
 				continue
 			}
 
 			// ANCHOR: Convert to enrichment type - Dec 27, 2025
-			// Maps ProcessEvent to enrichment.ProcessExecution
+			// Maps ProcessEvent to enrichment.EnrichedEvent with ProcessContext
 			// Strips null bytes from strings
-			// Adds timestamp
+			// Adds timestamp and event type
 
-			enriched := &enrichment.ProcessExecution{
-				PID:          evt.PID,
-				UID:          evt.UID,
-				GID:          evt.GID,
-				Capabilities: evt.Capabilities,
-				Filename:     strings.TrimRight(string(evt.Filename[:]), "\x00"),
-				Argv:         strings.TrimRight(string(evt.Argv[:]), "\x00"),
-				CgroupID:     evt.CgroupID,
-				Timestamp:    time.Now(),
-				EventType:    "process_execution",
+			procCtx := &enrichment.ProcessContext{
+				PID:      evt.PID,
+				UID:      evt.UID,
+				GID:      evt.GID,
+				Filename: strings.TrimRight(string(evt.Filename[:]), "\x00"),
+				Command:  strings.TrimRight(string(evt.Argv[:]), "\x00"),
+			}
+
+			enriched := &enrichment.EnrichedEvent{
+				RawEvent:  evt,
+				EventType: "process_execution",
+				Process:   procCtx,
+				Timestamp: time.Now(),
 			}
 
 			// Send to enrichment pipeline (non-blocking)
 			select {
 			case pm.eventChan <- enriched:
 				pm.logger.Debug("process event sent",
-					zap.Uint32("pid", enriched.PID))
+					zap.Uint32("pid", procCtx.PID))
 			case <-ctx.Done():
 				return
 			case <-pm.stopChan:
 				return
 			default:
 				pm.logger.Warn("event channel full, dropping event",
-					zap.Uint32("pid", enriched.PID))
+					zap.Uint32("pid", procCtx.PID))
 			}
 		}
 	}
 }
 
 // EventChan returns the channel for receiving events
-func (pm *ProcessMonitor) EventChan() <-chan *enrichment.ProcessExecution {
+func (pm *ProcessMonitor) EventChan() <-chan *enrichment.EnrichedEvent {
 	return pm.eventChan
 }
 

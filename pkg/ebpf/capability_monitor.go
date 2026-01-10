@@ -4,10 +4,10 @@
 package ebpf
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 
@@ -20,7 +20,7 @@ import (
 // Streams CapabilityUsage events from kernel to enrichment pipeline
 type CapabilityMonitor struct {
 	programSet *ProgramSet
-	eventChan  chan *enrichment.CapabilityUsage
+	eventChan  chan *enrichment.EnrichedEvent
 	logger     *zap.Logger
 	stopChan   chan struct{}
 	wg         sync.WaitGroup
@@ -32,7 +32,7 @@ type CapabilityMonitor struct {
 func NewCapabilityMonitor(programSet *ProgramSet, logger *zap.Logger) *CapabilityMonitor {
 	return &CapabilityMonitor{
 		programSet: programSet,
-		eventChan:  make(chan *enrichment.CapabilityUsage, 100),
+		eventChan:  make(chan *enrichment.EnrichedEvent, 100),
 		logger:     logger,
 		stopChan:   make(chan struct{}),
 	}
@@ -74,8 +74,8 @@ func (cm *CapabilityMonitor) eventLoop(ctx context.Context) {
 		default:
 			// ANCHOR: Read capability event from kernel - Dec 27, 2025
 			// Reads raw event bytes from perf/ringbuf reader
-			// Parses into CapabilityEvent struct
-			// Converts to enrichment.CapabilityUsage for pipeline
+			// Parses into CapabilityEvent struct using bytes.NewReader
+			// Converts to enrichment.EnrichedEvent with CapabilityContext
 
 			if cm.programSet.Reader == nil {
 				time.Sleep(100 * time.Millisecond)
@@ -97,39 +97,39 @@ func (cm *CapabilityMonitor) eventLoop(ctx context.Context) {
 
 			// Parse raw bytes to CapabilityEvent struct
 			evt := &CapabilityEvent{}
-			if err := binary.Read(strings.NewReader(""), binary.LittleEndian, evt); err != nil {
+			if err := binary.Read(bytes.NewReader(data), binary.LittleEndian, evt); err != nil {
 				cm.logger.Warn("parse event failed",
 					zap.Error(err))
 				continue
 			}
 
 			// ANCHOR: Convert to enrichment type - Dec 27, 2025
-			// Maps CapabilityEvent to enrichment.CapabilityUsage
+			// Maps CapabilityEvent to enrichment.EnrichedEvent with CapabilityContext
 			// Maps capability number to name
 			// Converts check type to string
 			// Adds timestamp
 
 			capName := capabilityName(evt.Capability)
-			checkType := "check"
-			if evt.CheckType == 2 {
-				checkType = "use"
+			allowed := evt.CheckType != 2
+
+			capCtx := &enrichment.CapabilityContext{
+				Name:    capName,
+				Allowed: allowed,
+				PID:     evt.PID,
 			}
 
-			enriched := &enrichment.CapabilityUsage{
-				PID:          evt.PID,
-				Capability:   capName,
-				CapID:        evt.Capability,
-				CheckType:    checkType,
-				CgroupID:     evt.CgroupID,
-				Timestamp:    time.Now(),
-				EventType:    "capability_usage",
+			enriched := &enrichment.EnrichedEvent{
+				RawEvent:  evt,
+				EventType: "capability_usage",
+				Capability: capCtx,
+				Timestamp: time.Now(),
 			}
 
 			// Send to enrichment pipeline (non-blocking)
 			select {
 			case cm.eventChan <- enriched:
 				cm.logger.Debug("capability event sent",
-					zap.Uint32("pid", enriched.PID),
+					zap.Uint32("pid", evt.PID),
 					zap.String("capability", capName))
 			case <-ctx.Done():
 				return
@@ -137,7 +137,7 @@ func (cm *CapabilityMonitor) eventLoop(ctx context.Context) {
 				return
 			default:
 				cm.logger.Warn("event channel full, dropping event",
-					zap.Uint32("pid", enriched.PID))
+					zap.Uint32("pid", evt.PID))
 			}
 		}
 	}
@@ -195,7 +195,7 @@ func capabilityName(cap uint32) string {
 }
 
 // EventChan returns the channel for receiving events
-func (cm *CapabilityMonitor) EventChan() <-chan *enrichment.CapabilityUsage {
+func (cm *CapabilityMonitor) EventChan() <-chan *enrichment.EnrichedEvent {
 	return cm.eventChan
 }
 

@@ -4,11 +4,11 @@
 package ebpf
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
 	"net"
-	"strings"
 	"sync"
 	"time"
 
@@ -21,7 +21,7 @@ import (
 // Streams NetworkConnection events from kernel to enrichment pipeline
 type NetworkMonitor struct {
 	programSet *ProgramSet
-	eventChan  chan *enrichment.NetworkConnection
+	eventChan  chan *enrichment.EnrichedEvent
 	logger     *zap.Logger
 	stopChan   chan struct{}
 	wg         sync.WaitGroup
@@ -33,7 +33,7 @@ type NetworkMonitor struct {
 func NewNetworkMonitor(programSet *ProgramSet, logger *zap.Logger) *NetworkMonitor {
 	return &NetworkMonitor{
 		programSet: programSet,
-		eventChan:  make(chan *enrichment.NetworkConnection, 100),
+		eventChan:  make(chan *enrichment.EnrichedEvent, 100),
 		logger:     logger,
 		stopChan:   make(chan struct{}),
 	}
@@ -75,8 +75,8 @@ func (nm *NetworkMonitor) eventLoop(ctx context.Context) {
 		default:
 			// ANCHOR: Read network event from kernel - Dec 27, 2025
 			// Reads raw event bytes from perf/ringbuf reader
-			// Parses into NetworkEvent struct
-			// Converts to enrichment.NetworkConnection for pipeline
+			// Parses into NetworkEvent struct using bytes.NewReader
+			// Converts to enrichment.EnrichedEvent with NetworkContext
 
 			if nm.programSet.Reader == nil {
 				time.Sleep(100 * time.Millisecond)
@@ -98,14 +98,14 @@ func (nm *NetworkMonitor) eventLoop(ctx context.Context) {
 
 			// Parse raw bytes to NetworkEvent struct
 			evt := &NetworkEvent{}
-			if err := binary.Read(strings.NewReader(""), binary.LittleEndian, evt); err != nil {
+			if err := binary.Read(bytes.NewReader(data), binary.LittleEndian, evt); err != nil {
 				nm.logger.Warn("parse event failed",
 					zap.Error(err))
 				continue
 			}
 
 			// ANCHOR: Convert to enrichment type - Dec 27, 2025
-			// Maps NetworkEvent to enrichment.NetworkConnection
+			// Maps NetworkEvent to enrichment.EnrichedEvent with NetworkContext
 			// Converts binary IP addresses to net.IP
 			// Converts binary ports from network byte order
 			// Adds timestamp
@@ -115,39 +115,41 @@ func (nm *NetworkMonitor) eventLoop(ctx context.Context) {
 				protocol = "udp"
 			}
 
-			enriched := &enrichment.NetworkConnection{
-				PID:              evt.PID,
-				Family:           evt.Family,
-				SourceIP:         net.IPv4(byte(evt.SAddr), byte(evt.SAddr>>8), byte(evt.SAddr>>16), byte(evt.SAddr>>24)),
-				DestinationIP:    net.IPv4(byte(evt.DAddr), byte(evt.DAddr>>8), byte(evt.DAddr>>16), byte(evt.DAddr>>24)),
-				SourcePort:       evt.SPort,
-				DestinationPort:  evt.DPort,
-				Protocol:         protocol,
-				CgroupID:         evt.CgroupID,
-				Timestamp:        time.Now(),
-				EventType:        "network_connection",
+			netCtx := &enrichment.NetworkContext{
+				SourceIP:        net.IPv4(byte(evt.SAddr), byte(evt.SAddr>>8), byte(evt.SAddr>>16), byte(evt.SAddr>>24)).String(),
+				DestinationIP:   net.IPv4(byte(evt.DAddr), byte(evt.DAddr>>8), byte(evt.DAddr>>16), byte(evt.DAddr>>24)).String(),
+				SourcePort:      evt.SPort,
+				DestinationPort: evt.DPort,
+				Protocol:        protocol,
+			}
+
+			enriched := &enrichment.EnrichedEvent{
+				RawEvent:  evt,
+				EventType: "network_connection",
+				Network:   netCtx,
+				Timestamp: time.Now(),
 			}
 
 			// Send to enrichment pipeline (non-blocking)
 			select {
 			case nm.eventChan <- enriched:
 				nm.logger.Debug("network event sent",
-					zap.Uint32("pid", enriched.PID),
-					zap.String("dest", enriched.DestinationIP.String()))
+					zap.Uint32("pid", evt.PID),
+					zap.String("dest", netCtx.DestinationIP))
 			case <-ctx.Done():
 				return
 			case <-nm.stopChan:
 				return
 			default:
 				nm.logger.Warn("event channel full, dropping event",
-					zap.Uint32("pid", enriched.PID))
+					zap.Uint32("pid", evt.PID))
 			}
 		}
 	}
 }
 
 // EventChan returns the channel for receiving events
-func (nm *NetworkMonitor) EventChan() <-chan *enrichment.NetworkConnection {
+func (nm *NetworkMonitor) EventChan() <-chan *enrichment.EnrichedEvent {
 	return nm.eventChan
 }
 
