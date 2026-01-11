@@ -3,12 +3,14 @@ module github.com/udyansh/elf-owl
 go 1.19
 
 require (
+
+	// eBPF monitoring via Cilium (new) and goBPF (transitional)
+	github.com/cilium/ebpf v0.11.0 // indirect
 	// HTTP client for Owl API
 	github.com/go-resty/resty/v2 v2.11.0
 
 	// Metrics
 	github.com/prometheus/client_golang v1.18.0
-	// Direct goBPF import for eBPF monitoring
 	github.com/udyansh/gobpf v0.1.0
 
 	// Logging
@@ -24,7 +26,6 @@ require (
 require (
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.2.0 // indirect
-	github.com/cilium/ebpf v0.11.0 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/emicklei/go-restful/v3 v3.11.0 // indirect
 	github.com/go-logr/logr v1.3.0 // indirect
@@ -63,7 +64,7 @@ require (
 	gopkg.in/inf.v0 v0.9.1 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 	k8s.io/api v0.29.0 // indirect
-	k8s.io/apimachinery v0.29.0 // indirect
+	k8s.io/apimachinery v0.29.0
 	k8s.io/klog/v2 v2.110.1 // indirect
 	k8s.io/kube-openapi v0.0.0-20231010175941-2dd684a91f00 // indirect
 	k8s.io/utils v0.0.0-20230726121419-3b25d923346b // indirect
@@ -83,4 +84,5 @@ replace golang.org/x/sys => golang.org/x/sys v0.13.0
 // Use golang.org/x/term v0.13.0 for Go 1.19 compatibility
 replace golang.org/x/term => golang.org/x/term v0.13.0
 
+// Temporary: goBPF will be removed after Phase 3 (monitor migration complete)
 replace github.com/udyansh/gobpf => ../gobpf
