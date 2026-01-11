@@ -4,6 +4,7 @@
 package ebpf
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -20,7 +21,7 @@ import (
 // Streams DNSQuery events from kernel to enrichment pipeline
 type DNSMonitor struct {
 	programSet *ProgramSet
-	eventChan  chan *enrichment.DNSQuery
+	eventChan  chan *enrichment.EnrichedEvent
 	logger     *zap.Logger
 	stopChan   chan struct{}
 	wg         sync.WaitGroup
@@ -32,7 +33,7 @@ type DNSMonitor struct {
 func NewDNSMonitor(programSet *ProgramSet, logger *zap.Logger) *DNSMonitor {
 	return &DNSMonitor{
 		programSet: programSet,
-		eventChan:  make(chan *enrichment.DNSQuery, 100),
+		eventChan:  make(chan *enrichment.EnrichedEvent, 100),
 		logger:     logger,
 		stopChan:   make(chan struct{}),
 	}
@@ -74,8 +75,8 @@ func (dm *DNSMonitor) eventLoop(ctx context.Context) {
 		default:
 			// ANCHOR: Read DNS event from kernel - Dec 27, 2025
 			// Reads raw event bytes from perf/ringbuf reader
-			// Parses into DNSEvent struct
-			// Converts to enrichment.DNSQuery for pipeline
+			// Parses into DNSEvent struct using bytes.NewReader
+			// Converts to enrichment.EnrichedEvent with DNSContext
 
 			if dm.programSet.Reader == nil {
 				time.Sleep(100 * time.Millisecond)
@@ -97,49 +98,48 @@ func (dm *DNSMonitor) eventLoop(ctx context.Context) {
 
 			// Parse raw bytes to DNSEvent struct
 			evt := &DNSEvent{}
-			if err := binary.Read(strings.NewReader(""), binary.LittleEndian, evt); err != nil {
+			if err := binary.Read(bytes.NewReader(data), binary.LittleEndian, evt); err != nil {
 				dm.logger.Warn("parse event failed",
 					zap.Error(err))
 				continue
 			}
 
 			// ANCHOR: Convert to enrichment type - Dec 27, 2025
-			// Maps DNSEvent to enrichment.DNSQuery
-			// Maps query type number to name
-			// Maps response code number to name
+			// Maps DNSEvent to enrichment.EnrichedEvent with DNSContext
+			// Maps query type number to name (RFC 1035)
+			// Maps response code number to name (RFC 1035)
 			// Strips null bytes from domain name
 			// Adds timestamp
 
 			queryType := dnsQueryTypeName(evt.QueryType)
-			responseCode := dnsResponseCodeName(evt.ResponseCode)
 
-			enriched := &enrichment.DNSQuery{
-				PID:              evt.PID,
-				QueryName:        strings.TrimRight(string(evt.QueryName[:]), "\x00"),
-				QueryType:        queryType,
-				QueryTypeID:      evt.QueryType,
-				ResponseCode:     responseCode,
-				ResponseCodeID:   evt.ResponseCode,
-				QueryAllowed:     evt.QueryAllowed == 1,
-				DNSServer:        strings.TrimRight(string(evt.Server[:]), "\x00"),
-				CgroupID:         evt.CgroupID,
-				Timestamp:        time.Now(),
-				EventType:        "dns_query",
+			dnsCtx := &enrichment.DNSContext{
+				QueryName:    strings.TrimRight(string(evt.QueryName[:]), "\x00"),
+				QueryType:    queryType,
+				ResponseCode: int(evt.ResponseCode),
+				QueryAllowed: evt.QueryAllowed == 1,
+			}
+
+			enriched := &enrichment.EnrichedEvent{
+				RawEvent:  evt,
+				EventType: "dns_query",
+				DNS:       dnsCtx,
+				Timestamp: time.Now(),
 			}
 
 			// Send to enrichment pipeline (non-blocking)
 			select {
 			case dm.eventChan <- enriched:
 				dm.logger.Debug("dns event sent",
-					zap.Uint32("pid", enriched.PID),
-					zap.String("domain", enriched.QueryName))
+					zap.Uint32("pid", evt.PID),
+					zap.String("domain", dnsCtx.QueryName))
 			case <-ctx.Done():
 				return
 			case <-dm.stopChan:
 				return
 			default:
 				dm.logger.Warn("event channel full, dropping event",
-					zap.Uint32("pid", enriched.PID))
+					zap.Uint32("pid", evt.PID))
 			}
 		}
 	}
@@ -172,16 +172,16 @@ func dnsQueryTypeName(qtype uint16) string {
 // dnsResponseCodeName maps DNS response code number to name (RFC 1035)
 func dnsResponseCodeName(rcode uint8) string {
 	rcodeNames := map[uint8]string{
-		0: "NOERROR",
-		1: "FORMERR",
-		2: "SERVFAIL",
-		3: "NXDOMAIN",
-		4: "NOTIMP",
-		5: "REFUSED",
-		6: "YXDOMAIN",
-		7: "YXRRSET",
-		8: "NXRRSET",
-		9: "NOTAUTH",
+		0:  "NOERROR",
+		1:  "FORMERR",
+		2:  "SERVFAIL",
+		3:  "NXDOMAIN",
+		4:  "NOTIMP",
+		5:  "REFUSED",
+		6:  "YXDOMAIN",
+		7:  "YXRRSET",
+		8:  "NXRRSET",
+		9:  "NOTAUTH",
 		10: "NOTZONE",
 	}
 
@@ -192,7 +192,7 @@ func dnsResponseCodeName(rcode uint8) string {
 }
 
 // EventChan returns the channel for receiving events
-func (dm *DNSMonitor) EventChan() <-chan *enrichment.DNSQuery {
+func (dm *DNSMonitor) EventChan() <-chan *enrichment.EnrichedEvent {
 	return dm.eventChan
 }
 

@@ -4,6 +4,7 @@
 package ebpf
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"fmt"
@@ -20,7 +21,7 @@ import (
 // Streams FileAccess events from kernel to enrichment pipeline
 type FileMonitor struct {
 	programSet *ProgramSet
-	eventChan  chan *enrichment.FileAccess
+	eventChan  chan *enrichment.EnrichedEvent
 	logger     *zap.Logger
 	stopChan   chan struct{}
 	wg         sync.WaitGroup
@@ -32,7 +33,7 @@ type FileMonitor struct {
 func NewFileMonitor(programSet *ProgramSet, logger *zap.Logger) *FileMonitor {
 	return &FileMonitor{
 		programSet: programSet,
-		eventChan:  make(chan *enrichment.FileAccess, 100),
+		eventChan:  make(chan *enrichment.EnrichedEvent, 100),
 		logger:     logger,
 		stopChan:   make(chan struct{}),
 	}
@@ -74,8 +75,8 @@ func (fm *FileMonitor) eventLoop(ctx context.Context) {
 		default:
 			// ANCHOR: Read file event from kernel - Dec 27, 2025
 			// Reads raw event bytes from perf/ringbuf reader
-			// Parses into FileEvent struct
-			// Converts to enrichment.FileAccess for pipeline
+			// Parses into FileEvent struct using bytes.NewReader
+			// Converts to enrichment.EnrichedEvent with FileContext
 
 			if fm.programSet.Reader == nil {
 				time.Sleep(100 * time.Millisecond)
@@ -97,14 +98,14 @@ func (fm *FileMonitor) eventLoop(ctx context.Context) {
 
 			// Parse raw bytes to FileEvent struct
 			evt := &FileEvent{}
-			if err := binary.Read(strings.NewReader(""), binary.LittleEndian, evt); err != nil {
+			if err := binary.Read(bytes.NewReader(data), binary.LittleEndian, evt); err != nil {
 				fm.logger.Warn("parse event failed",
 					zap.Error(err))
 				continue
 			}
 
 			// ANCHOR: Convert to enrichment type - Dec 27, 2025
-			// Maps FileEvent to enrichment.FileAccess
+			// Maps FileEvent to enrichment.EnrichedEvent with FileContext
 			// Converts operation type number to string
 			// Strips null bytes from strings
 			// Adds timestamp
@@ -123,36 +124,39 @@ func (fm *FileMonitor) eventLoop(ctx context.Context) {
 				opType = "unknown"
 			}
 
-			enriched := &enrichment.FileAccess{
-				PID:        evt.PID,
-				Operation:  opType,
-				Flags:      evt.Flags,
-				Filename:   strings.TrimRight(string(evt.Filename[:]), "\x00"),
-				CgroupID:   evt.CgroupID,
-				Timestamp:  time.Now(),
-				EventType:  "file_write",
+			fileCtx := &enrichment.FileContext{
+				Path:      strings.TrimRight(string(evt.Filename[:]), "\x00"),
+				Operation: opType,
+				PID:       evt.PID,
+			}
+
+			enriched := &enrichment.EnrichedEvent{
+				RawEvent:  evt,
+				EventType: "file_access",
+				File:      fileCtx,
+				Timestamp: time.Now(),
 			}
 
 			// Send to enrichment pipeline (non-blocking)
 			select {
 			case fm.eventChan <- enriched:
 				fm.logger.Debug("file event sent",
-					zap.Uint32("pid", enriched.PID),
-					zap.String("file", enriched.Filename))
+					zap.Uint32("pid", evt.PID),
+					zap.String("file", fileCtx.Path))
 			case <-ctx.Done():
 				return
 			case <-fm.stopChan:
 				return
 			default:
 				fm.logger.Warn("event channel full, dropping event",
-					zap.Uint32("pid", enriched.PID))
+					zap.Uint32("pid", evt.PID))
 			}
 		}
 	}
 }
 
 // EventChan returns the channel for receiving events
-func (fm *FileMonitor) EventChan() <-chan *enrichment.FileAccess {
+func (fm *FileMonitor) EventChan() <-chan *enrichment.EnrichedEvent {
 	return fm.eventChan
 }
 

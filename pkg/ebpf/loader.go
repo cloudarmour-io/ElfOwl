@@ -5,10 +5,8 @@
 package ebpf
 
 import (
-	"bytes"
 	"embed"
 	"fmt"
-	"io/fs"
 
 	"github.com/cilium/ebpf"
 	"go.uber.org/zap"
