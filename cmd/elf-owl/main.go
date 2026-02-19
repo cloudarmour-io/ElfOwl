@@ -2,7 +2,7 @@
 // Starts the compliance observer agent with cilium/ebpf integration.
 // Reads configuration from YAML and environment variables.
 // Initializes all components and runs the event processing pipeline.
-// Serves /healthz (JSON health status) and /metrics (Prometheus) HTTP endpoints.
+// Serves /health (JSON health status) and /metrics (Prometheus) HTTP endpoints.
 
 package main
 
@@ -77,21 +77,17 @@ func main() {
 		zap.Int("batchSize", config.Agent.OWL.Push.BatchSize),
 	)
 
-	// ANCHOR: Health HTTP server - Feb 18, 2026
+	// ANCHOR: Health HTTP server - Feb 18, 2026 / fixed Feb 18, 2026
 	// WHY: HealthStatus was computed in-memory but never exposed; Kubernetes liveness
 	//      and readiness probes, as well as operators, need an HTTP endpoint.
-	// WHAT: Serve GET /healthz returning JSON-encoded agent.HealthStatus.
-	// HOW: Spin up a dedicated net/http server on the configured listen address
-	//      (default :8081) so it is independent of the main event loop.
+	// WHAT: Serve GET /health returning JSON-encoded agent.HealthStatus.
+	// HOW: Dedicated net/http server on address and path from config (:9091/health
+	//      by default via DefaultConfig()). No hardcoded fallbacks — they drifted
+	//      from DefaultConfig() values (:8081/healthz vs :9091/health) and would
+	//      silently override operator configuration if a field ever parsed as "".
 	if config.Agent.Health.Enabled {
 		healthAddr := config.Agent.Health.ListenAddress
-		if healthAddr == "" {
-			healthAddr = ":8081"
-		}
 		healthPath := config.Agent.Health.Path
-		if healthPath == "" {
-			healthPath = "/healthz"
-		}
 
 		healthMux := http.NewServeMux()
 		healthMux.HandleFunc(healthPath, func(w http.ResponseWriter, r *http.Request) {
@@ -110,22 +106,17 @@ func main() {
 		}()
 	}
 
-	// ANCHOR: Prometheus metrics HTTP server - Feb 18, 2026
+	// ANCHOR: Prometheus metrics HTTP server - Feb 18, 2026 / fixed Feb 18, 2026
 	// WHY: MetricsRegistry counters were incremented but never scraped; no HTTP
 	//      server was wired to expose the /metrics endpoint for Prometheus.
 	// WHAT: Serve GET /metrics using the standard promhttp.Handler() which reads
 	//       from the global Prometheus registry (promauto registers there by default).
-	// HOW: Dedicated net/http server on configured address (default :8080) so
-	//      metric scraping is isolated from agent event processing.
+	// HOW: Dedicated net/http server on address and path from config (:9090/metrics
+	//      by default via DefaultConfig()). Fallbacks (:8080/metrics) removed as
+	//      they differed from config defaults and masked misconfiguration.
 	if config.Agent.Metrics.Enabled {
 		metricsAddr := config.Agent.Metrics.ListenAddress
-		if metricsAddr == "" {
-			metricsAddr = ":8080"
-		}
 		metricsPath := config.Agent.Metrics.Path
-		if metricsPath == "" {
-			metricsPath = "/metrics"
-		}
 
 		metricsMux := http.NewServeMux()
 		metricsMux.Handle(metricsPath, promhttp.Handler())

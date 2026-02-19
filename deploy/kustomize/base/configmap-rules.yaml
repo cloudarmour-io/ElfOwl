@@ -1,0 +1,73 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: elf-owl-rules
+  namespace: elf-owl-system
+  labels:
+    app: elf-owl
+# ANCHOR: Starter rules ConfigMap - High finding fix - Feb 18, 2026
+# WHY: Rules ConfigMap was referenced in agent config and RBAC but never
+#      deployed, causing rule loader to fall back to built-in CIS defaults
+#      without surfacing the failure.
+# WHAT: Deploys elf-owl-rules ConfigMap with key "rules.yaml" containing
+#       a representative subset of CIS Kubernetes v1.8 automated controls.
+# HOW: Loaded by rules.LoadRulesFromConfigMap at agent startup when
+#      rules.config_map.name / namespace is set in elf-owl.yaml.
+data:
+  rules.yaml: |
+    # CIS Kubernetes Benchmark v1.8 — starter rule set
+    # Extend or replace with site-specific controls as needed.
+
+    - controlID: "CIS_4.2.1"
+      title: "Container running as root"
+      severity: "HIGH"
+      eventTypes:
+        - "process"
+      conditions:
+        - field: "process.uid"
+          operator: "equals"
+          value: 0
+
+    - controlID: "CIS_4.4.1"
+      title: "Privileged container detected"
+      severity: "CRITICAL"
+      eventTypes:
+        - "process"
+      conditions:
+        - field: "process.privileged"
+          operator: "equals"
+          value: true
+
+    - controlID: "CIS_4.5.5"
+      title: "Write to sensitive filesystem path"
+      severity: "HIGH"
+      eventTypes:
+        - "file_access"
+      conditions:
+        - field: "file.path"
+          operator: "starts_with"
+          value: "/etc/"
+
+    - controlID: "CIS_4.6.1"
+      title: "Outbound network connection without network policy"
+      severity: "MEDIUM"
+      eventTypes:
+        - "network_connection"
+      conditions:
+        - field: "network.direction"
+          operator: "equals"
+          value: "egress"
+
+    - controlID: "CIS_5.1.1"
+      title: "Dangerous Linux capability used"
+      severity: "HIGH"
+      eventTypes:
+        - "capability"
+      conditions:
+        - field: "capability.name"
+          operator: "in"
+          value:
+            - "CAP_SYS_ADMIN"
+            - "CAP_NET_ADMIN"
+            - "CAP_SYS_PTRACE"
+            - "CAP_DAC_OVERRIDE"

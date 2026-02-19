@@ -1,6 +1,5 @@
 // ANCHOR: Owl SaaS push-only API client - Dec 26, 2025
 // Pushes signed/encrypted evidence to Owl SaaS (one-way outbound only)
-// IMPLEMENTATION IN PROGRESS - Week 3 task
 
 package api
 
@@ -8,9 +7,13 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"sync"
 	"time"
 
@@ -32,6 +35,7 @@ type Client struct {
 	logger        *zap.Logger
 	signer        *evidence.Signer
 	cipher        *evidence.Cipher
+	tlsConfig     *tls.Config
 	retryConfig   config.RetryConfig
 
 	// Metrics (thread-safe with mutex)
@@ -42,6 +46,14 @@ type Client struct {
 }
 
 // NewClient creates a new Owl API client
+//
+// ANCHOR: NewClient with TLS wiring - Findings Note - Feb 18, 2026
+// WHY: TLSConfig was stored in agent config but never applied to the HTTP client,
+//      causing all pushes to ignore CA cert verification and client certs.
+// WHAT: Accept a *tls.Config built by the caller and apply it to the resty client
+//       so that CACertPath, client cert/key, and InsecureSkipVerify are honoured.
+// HOW: Caller (agent.go) reads TLS files from disk and constructs *tls.Config;
+//      we apply it via resty.SetTLSClientConfig. Nil means use system defaults.
 func NewClient(
 	endpoint string,
 	clusterID string,
@@ -49,6 +61,7 @@ func NewClient(
 	jwtToken string,
 	signer *evidence.Signer,
 	cipher *evidence.Cipher,
+	tlsCfg *tls.Config,
 	retryConfig config.RetryConfig,
 ) (*Client, error) {
 	if endpoint == "" {
@@ -65,41 +78,100 @@ func NewClient(
 
 	logger, _ := zap.NewProduction()
 
+	rc := resty.New()
+	if tlsCfg != nil {
+		rc.SetTLSClientConfig(tlsCfg)
+	}
+
 	return &Client{
 		endpoint:    endpoint,
 		clusterID:   clusterID,
 		nodeName:    nodeName,
 		jwtToken:    jwtToken,
-		httpClient:  resty.New(),
+		httpClient:  rc,
 		logger:      logger,
 		signer:      signer,
 		cipher:      cipher,
+		tlsConfig:   tlsCfg,
 		retryConfig: retryConfig,
 	}, nil
 }
 
-// PushBatch is the JSON payload sent to the Owl SaaS events endpoint.
+// BuildTLSConfig constructs a *tls.Config from the agent's TLS settings.
+// Returns nil (use system defaults) when TLS is disabled or no custom certs
+// are configured. Called by agent.go to avoid a circular package import.
+//
+// ANCHOR: BuildTLSConfig helper - Findings Note - Feb 18, 2026
+// WHY: api package cannot import agent package (circular); agent package builds
+//      the *tls.Config using this helper which only takes primitive values.
+// WHAT: Load CA cert, client cert/key from disk; build *tls.Config.
+// HOW: Uses crypto/x509 and crypto/tls from stdlib; no external deps.
+func BuildTLSConfig(enabled, verify bool, caCertPath, clientCertPath, clientKeyPath string) (*tls.Config, error) {
+	if !enabled {
+		return nil, nil
+	}
+
+	tlsCfg := &tls.Config{
+		InsecureSkipVerify: !verify, //nolint:gosec // controlled by operator config
+	}
+
+	if caCertPath != "" {
+		caPEM, err := os.ReadFile(caCertPath)
+		if err != nil {
+			return nil, fmt.Errorf("read CA cert %s: %w", caCertPath, err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(caPEM) {
+			return nil, fmt.Errorf("failed to parse CA cert %s", caCertPath)
+		}
+		tlsCfg.RootCAs = pool
+	}
+
+	if clientCertPath != "" && clientKeyPath != "" {
+		cert, err := tls.LoadX509KeyPair(clientCertPath, clientKeyPath)
+		if err != nil {
+			return nil, fmt.Errorf("load client cert/key: %w", err)
+		}
+		tlsCfg.Certificates = []tls.Certificate{cert}
+	}
+
+	return tlsCfg, nil
+}
+
+// PushBatch is the plaintext JSON payload before encryption.
+// It is signed (HMAC-SHA256) before being encrypted.
 type PushBatch struct {
-	ClusterID string                   `json:"cluster_id"`
-	NodeName  string                   `json:"node_name"`
+	ClusterID string                    `json:"cluster_id"`
+	NodeName  string                    `json:"node_name"`
 	Events    []*evidence.BufferedEvent `json:"events"`
-	Signature string                   `json:"signature"`
-	SentAt    time.Time                `json:"sent_at"`
+	Signature string                    `json:"signature"`
+	SentAt    time.Time                 `json:"sent_at"`
+}
+
+// EncryptedEnvelope is the outer JSON wrapper sent over the wire when encryption
+// is enabled. The server decrypts ciphertext using nonce, then verifies the
+// HMAC signature inside the plaintext PushBatch.
+type EncryptedEnvelope struct {
+	Encrypted  bool   `json:"encrypted"`
+	Ciphertext string `json:"ciphertext"` // base64-encoded AES-256-GCM ciphertext
+	Nonce      string `json:"nonce"`      // base64-encoded 12-byte GCM nonce
 }
 
 // Push sends buffered events to Owl SaaS (single attempt).
 //
-// ANCHOR: Implement event push: JSON+sign+gzip+HTTP POST - Feb 18, 2026
-// WHY: Previously returned "not yet implemented"; events were buffered locally
-//      but never shipped to the Owl compliance platform.
-// WHAT: Serialise the batch to JSON, sign it with HMAC-SHA256 for integrity,
-//       gzip-compress the payload to reduce bandwidth, then POST to the Owl
-//       /api/v1/evidence endpoint with JWT Bearer auth and cluster identity headers.
-// HOW:  1. json.Marshal the PushBatch (events + cluster metadata)
-//       2. Sign the raw JSON bytes with c.signer.Sign() → HMAC-SHA256 hex
-//       3. Embed signature in a wrapper, re-marshal, gzip compress
-//       4. POST with Authorization, Content-Encoding, X-Cluster-ID headers
-//       5. Accept HTTP 200/202; anything else is an error
+// ANCHOR: Implement event push: JSON+sign+encrypt+gzip+HTTP POST - Feb 18, 2026 / Fixed Feb 18, 2026
+// WHY: Previously returned "not yet implemented". Second pass wires AES-256-GCM
+//      encryption that was committed but never called (Critical finding).
+// WHAT: Sign plaintext JSON with HMAC-SHA256, encrypt the signed JSON with
+//       AES-256-GCM, wrap in EncryptedEnvelope, gzip, POST.
+// HOW:  1. Marshal PushBatch to JSON
+//       2. Sign raw JSON → embed signature → re-marshal (sign-then-encrypt)
+//       3. If cipher present: Encrypt(signedJSON) → base64(ciphertext+nonce)
+//          wrapped in EncryptedEnvelope → marshal envelope
+//          If no cipher: send signed JSON directly (dev/test mode)
+//       4. gzip compress final payload
+//       5. POST with Authorization, Content-Encoding, X-Encrypted headers
+//       6. Accept HTTP 200/202; anything else is an error
 func (c *Client) Push(ctx context.Context, bufferedEvents []*evidence.BufferedEvent) error {
 	if len(bufferedEvents) == 0 {
 		return nil
@@ -123,27 +195,62 @@ func (c *Client) Push(ctx context.Context, bufferedEvents []*evidence.BufferedEv
 		return fmt.Errorf("push: marshal batch: %w", err)
 	}
 
-	// Step 3: Sign the raw JSON for integrity verification by Owl SaaS
+	// Step 3: Sign the raw JSON for integrity verification by Owl SaaS.
+	// We sign BEFORE encryption (sign-then-encrypt) so the server can verify
+	// integrity after decryption without needing a second round-trip.
 	if c.signer != nil {
 		batch.Signature = c.signer.Sign(rawJSON)
-		// Re-marshal with signature included
+		// Re-marshal with signature embedded in the batch
 		rawJSON, err = json.Marshal(batch)
 		if err != nil {
 			return fmt.Errorf("push: marshal signed batch: %w", err)
 		}
 	}
 
-	// Step 4: gzip compress
+	// Step 4: Encrypt the signed JSON with AES-256-GCM.
+	// ANCHOR: AES-256-GCM encryption of push payload - Critical finding fix - Feb 18, 2026
+	// WHY: Cipher was stored in Client struct but never called; evidence was sent
+	//      in plaintext over the wire violating the AES-256-GCM requirement.
+	// WHAT: Encrypt signed JSON → wrap ciphertext+nonce in EncryptedEnvelope.
+	// HOW:  cipher.Encrypt() returns (ciphertext, nonce) separately; both are
+	//       base64-encoded and packed into the envelope so the server can decrypt.
+	var wirePayload []byte
+	encrypted := false
+	if c.cipher != nil {
+		ciphertext, nonce, err := c.cipher.Encrypt(rawJSON)
+		if err != nil {
+			return fmt.Errorf("push: encrypt payload: %w", err)
+		}
+		envelope := &EncryptedEnvelope{
+			Encrypted:  true,
+			Ciphertext: base64.StdEncoding.EncodeToString(ciphertext),
+			Nonce:      base64.StdEncoding.EncodeToString(nonce),
+		}
+		wirePayload, err = json.Marshal(envelope)
+		if err != nil {
+			return fmt.Errorf("push: marshal envelope: %w", err)
+		}
+		encrypted = true
+	} else {
+		// No cipher configured: send signed JSON directly (dev/test mode only)
+		wirePayload = rawJSON
+	}
+
+	// Step 5: gzip compress the wire payload
 	var buf bytes.Buffer
 	gz := gzip.NewWriter(&buf)
-	if _, err := gz.Write(rawJSON); err != nil {
+	if _, err := gz.Write(wirePayload); err != nil {
 		return fmt.Errorf("push: gzip write: %w", err)
 	}
 	if err := gz.Close(); err != nil {
 		return fmt.Errorf("push: gzip close: %w", err)
 	}
 
-	// Step 5: POST to Owl SaaS
+	// Step 6: POST to Owl SaaS
+	encryptedHeader := "false"
+	if encrypted {
+		encryptedHeader = "true"
+	}
 	url := c.endpoint + "/api/v1/evidence"
 	resp, err := c.httpClient.R().
 		SetContext(ctx).
@@ -152,6 +259,7 @@ func (c *Client) Push(ctx context.Context, bufferedEvents []*evidence.BufferedEv
 		SetHeader("Authorization", "Bearer "+c.jwtToken).
 		SetHeader("X-Cluster-ID", c.clusterID).
 		SetHeader("X-Node-Name", c.nodeName).
+		SetHeader("X-Encrypted", encryptedHeader).
 		SetBody(buf.Bytes()).
 		Post(url)
 
@@ -166,6 +274,7 @@ func (c *Client) Push(ctx context.Context, bufferedEvents []*evidence.BufferedEv
 	c.logger.Debug("push: succeeded",
 		zap.Int("events", len(bufferedEvents)),
 		zap.Int("compressedBytes", buf.Len()),
+		zap.Bool("encrypted", encrypted),
 		zap.Int("statusCode", resp.StatusCode()),
 	)
 

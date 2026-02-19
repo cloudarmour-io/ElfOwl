@@ -204,6 +204,26 @@ func NewAgent(config *Config) (*Agent, error) {
 		zap.Duration("batch_timeout", config.Agent.OWL.Push.BatchTimeout),
 	)
 
+	// ANCHOR: Build TLS config for Owl API client - Findings Note fix - Feb 18, 2026
+	// WHY: TLSConfig fields (CACertPath, client cert/key, InsecureSkipVerify) were
+	//      parsed from YAML but never applied to the HTTP client. All pushes used
+	//      the default system TLS settings regardless of operator configuration.
+	// WHAT: Call api.BuildTLSConfig with the operator's TLS settings to produce
+	//       a *tls.Config that resty applies to every outbound request.
+	// HOW: api.BuildTLSConfig reads cert files from disk and builds *tls.Config;
+	//      returns nil when TLS is disabled so resty uses system defaults.
+	tlsCfg, err := api.BuildTLSConfig(
+		config.Agent.OWL.TLS.Enabled,
+		config.Agent.OWL.TLS.Verify,
+		config.Agent.OWL.TLS.CACertPath,
+		config.Agent.OWL.TLS.ClientCertPath,
+		config.Agent.OWL.TLS.ClientKeyPath,
+	)
+	if err != nil {
+		agent.Logger.Warn("TLS config build failed, using system defaults", zap.Error(err))
+		tlsCfg = nil
+	}
+
 	// Initialize Owl API client
 	apiClient, err := api.NewClient(
 		config.Agent.OWL.Endpoint,
@@ -212,6 +232,7 @@ func NewAgent(config *Config) (*Agent, error) {
 		agent.getJWTToken(),
 		agent.Signer,
 		agent.Cipher,
+		tlsCfg,
 		config.Agent.OWL.Retry,
 	)
 	if err != nil {
@@ -323,7 +344,10 @@ func (a *Agent) handleProcessEvents(ctx context.Context) {
 				a.metricsMutex.Lock()
 				a.violationsFound += int64(len(violations))
 				a.metricsMutex.Unlock()
-				a.MetricsRegistry.RecordViolationFound()
+				// ANCHOR: Count every violation - Medium finding fix - Feb 18, 2026
+				// WHY: Previously called RecordViolationFound() once per event, undercounting
+				//      when multiple rules matched the same event.
+				a.MetricsRegistry.RecordViolationsFound(len(violations))
 				for _, violation := range violations {
 					a.Logger.Info("CIS violation detected",
 						zap.String("control", violation.ControlID),
@@ -380,7 +404,7 @@ func (a *Agent) handleNetworkEvents(ctx context.Context) {
 				a.metricsMutex.Lock()
 				a.violationsFound += int64(len(violations))
 				a.metricsMutex.Unlock()
-				a.MetricsRegistry.RecordViolationFound()
+				a.MetricsRegistry.RecordViolationsFound(len(violations))
 			}
 
 			a.EventBuffer.Enqueue(enrichedEvent, violations)
@@ -431,7 +455,7 @@ func (a *Agent) handleDNSEvents(ctx context.Context) {
 				a.metricsMutex.Lock()
 				a.violationsFound += int64(len(violations))
 				a.metricsMutex.Unlock()
-				a.MetricsRegistry.RecordViolationFound()
+				a.MetricsRegistry.RecordViolationsFound(len(violations))
 			}
 
 			a.EventBuffer.Enqueue(enrichedEvent, violations)
@@ -480,7 +504,7 @@ func (a *Agent) handleFileEvents(ctx context.Context) {
 				a.metricsMutex.Lock()
 				a.violationsFound += int64(len(violations))
 				a.metricsMutex.Unlock()
-				a.MetricsRegistry.RecordViolationFound()
+				a.MetricsRegistry.RecordViolationsFound(len(violations))
 			}
 
 			a.EventBuffer.Enqueue(enrichedEvent, violations)
@@ -529,7 +553,7 @@ func (a *Agent) handleCapabilityEvents(ctx context.Context) {
 				a.metricsMutex.Lock()
 				a.violationsFound += int64(len(violations))
 				a.metricsMutex.Unlock()
-				a.MetricsRegistry.RecordViolationFound()
+				a.MetricsRegistry.RecordViolationsFound(len(violations))
 			}
 
 			a.EventBuffer.Enqueue(enrichedEvent, violations)
