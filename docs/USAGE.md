@@ -198,6 +198,17 @@ elf-owl includes a **rule engine** that evaluates enriched events against securi
 3. **Violation detection** - If event matches rule conditions, a violation is recorded
 4. **Compliance tagging** - Violation is tagged with relevant compliance frameworks
 
+### Rule Sources
+
+elf-owl supports two rule sources:
+
+- **File-based rules (default)**: `config/rules/cis-controls.yaml` contains the full CIS v1.8 ruleset. Configure with `rules.file_path` in `elf-owl.yaml`.
+- **ConfigMap rules (opt-in)**: A small starter subset is provided in `deploy/helm/templates/configmap-rules.yaml` and `deploy/kustomize/base/configmap-rules.yaml`. Enable explicitly:
+  - Helm: `--set rules.configMap.enabled=true`
+  - Kustomize: `kubectl apply -k deploy/kustomize/overlays/with-rules`
+
+The ConfigMap starter set is intentionally small; use it as a template or switch to the full file-based rules for complete CIS coverage.
+
 ### Example Rule
 
 ```yaml

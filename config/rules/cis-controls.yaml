@@ -1,6 +1,8 @@
 # ANCHOR: CIS Kubernetes v1.8 automated controls - Phase 3.1 Week 3
 # 48 automated compliance controls for Kubernetes pod security
 # Generated from pkg/rules/cis_mappings.go for easy configuration management
+# NOTE: This file represents the full CIS rule set for file-based loading.
+# The opt-in rules ConfigMap is a smaller starter subset (see deploy/*/configmap-rules.yaml).
 
 ---
 # ===== POD SECURITY CONTEXT CONTROLS =====

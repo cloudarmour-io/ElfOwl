@@ -13,6 +13,7 @@ metadata:
 #      deployed, causing rule loader to fall back to built-in CIS defaults
 #      without surfacing the failure. This starter set lets operators know
 #      the mechanism works and gives them a template to extend.
+# NOTE: This is a starter subset. The full rule set lives in config/rules/cis-controls.yaml.
 # WHAT: Deploys elf-owl-rules ConfigMap with key "rules.yaml" containing a
 #       representative subset of CIS Kubernetes v1.8 automated controls.
 # HOW: Loaded by rules.LoadRulesFromConfigMap at agent startup when

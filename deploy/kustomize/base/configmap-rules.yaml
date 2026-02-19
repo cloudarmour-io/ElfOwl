@@ -13,6 +13,7 @@ metadata:
 #       a representative subset of CIS Kubernetes v1.8 automated controls.
 # HOW: Loaded by rules.LoadRulesFromConfigMap at agent startup when
 #      rules.config_map.name / namespace is set in elf-owl.yaml.
+# NOTE: This is a starter subset. The full rule set lives in config/rules/cis-controls.yaml.
 data:
   rules.yaml: |
     # CIS Kubernetes Benchmark v1.8 — starter rule set

@@ -336,7 +336,17 @@ go test ./test/e2e/...
 
 ### Adding New Rules
 
-Edit `pkg/rules/cis_mappings.go` to add CIS control detection rules.
+There are two supported rule sources:
+
+- **Full CIS rule file (default)**: `config/rules/cis-controls.yaml` contains the full CIS v1.8 ruleset. You can load this via `rules.file_path` in `elf-owl.yaml`.
+- **Starter rules ConfigMap (opt-in)**: `deploy/helm/templates/configmap-rules.yaml` and `deploy/kustomize/base/configmap-rules.yaml` ship a small starter subset. This is **opt-in** by design and is enabled only when configured (see below).
+
+Enable ConfigMap rules:
+
+- **Helm**: `--set rules.configMap.enabled=true` (optional name/namespace in values)
+- **Kustomize**: `kubectl apply -k deploy/kustomize/overlays/with-rules`
+
+If you want to extend the built-in ruleset for development, edit `pkg/rules/cis_mappings.go` and regenerate any derived YAML as needed.
 
 ---
 

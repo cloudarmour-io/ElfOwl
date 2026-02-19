@@ -734,6 +734,11 @@ rules:
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
     verbs: ["get", "list"]
+
+**ConfigMap rules (optional):** If you opt in to rules from ConfigMap, grant read access to `configmaps` and enable the rules source:
+
+- Helm: `--set rules.configMap.enabled=true`
+- Kustomize: `kubectl apply -k deploy/kustomize/overlays/with-rules`
 ```
 
 ## Monitoring elf-owl
