@@ -15,6 +15,13 @@ owl:
   # Secret name containing key "api-token"
   apiTokenSecret: "elf-owl-api-token"
 
+# Optional rules ConfigMap (defaults to built-in CIS rules)
+rules:
+  configMap:
+    enabled: false
+    name: "elf-owl-rules"
+    namespace: "" # Defaults to .Release.Namespace when empty
+
 # eBPF monitor toggles
 ebpf:
   enabled: true

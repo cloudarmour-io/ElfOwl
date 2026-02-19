@@ -64,6 +64,15 @@ data:
           enabled: true
           verify: true
 
+      {{ if .Values.rules.configMap.enabled }}
+      rules:
+        config_map:
+          name: {{ default "elf-owl-rules" .Values.rules.configMap.name | quote }}
+          namespace: {{ default .Release.Namespace .Values.rules.configMap.namespace | quote }}
+        eval_timeout: 5s
+        log_violations: true
+      {{ end }}
+
       metrics:
         enabled: {{ .Values.metrics.enabled }}
         listen_address: {{ .Values.metrics.listenAddress | quote }}

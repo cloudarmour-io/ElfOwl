@@ -9,7 +9,6 @@ resources:
   - clusterrole.yaml
   - clusterrolebinding.yaml
   - configmap.yaml
-  - configmap-rules.yaml
   - service.yaml
   - daemonset.yaml
 

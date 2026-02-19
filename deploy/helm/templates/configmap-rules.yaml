@@ -1,8 +1,9 @@
+{{- if .Values.rules.configMap.enabled }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: elf-owl-rules
-  namespace: {{ .Release.Namespace }}
+  name: {{ default "elf-owl-rules" .Values.rules.configMap.name }}
+  namespace: {{ default .Release.Namespace .Values.rules.configMap.namespace }}
   labels:
     app: elf-owl
     chart: {{ .Chart.Name }}-{{ .Chart.Version }}
@@ -77,3 +78,4 @@ data:
             - "CAP_NET_ADMIN"
             - "CAP_SYS_PTRACE"
             - "CAP_DAC_OVERRIDE"
+{{- end }}
