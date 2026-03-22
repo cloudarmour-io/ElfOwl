@@ -606,10 +606,14 @@ func (e *Enricher) EnrichNetworkEvent(
 			networkCtx.IngressRestricted = npStatus.IngressRestricted
 			networkCtx.EgressRestricted = npStatus.EgressRestricted
 			networkCtx.NamespaceIsolation = npStatus.NamespaceIsolation
+			// ANCHOR: Default deny policy flag on network events - Bugfix: CIS_4.6.1 false positives - Mar 22, 2026
+			// Populate Kubernetes.HasDefaultDenyNetworkPolicy so CIS_4.6.1 evaluates correctly.
+			k8sCtx.HasDefaultDenyNetworkPolicy = npStatus.NamespaceIsolation
 		}
 	} else if k8sCtx.Namespace != "" && e.K8sClient != nil {
 		// Fallback: check namespace-wide default deny if we know the namespace
 		networkCtx.NamespaceIsolation = e.K8sClient.CheckNamespaceDefaultDenyPolicy(ctx, k8sCtx.Namespace)
+		k8sCtx.HasDefaultDenyNetworkPolicy = networkCtx.NamespaceIsolation
 	}
 
 	return &EnrichedEvent{
