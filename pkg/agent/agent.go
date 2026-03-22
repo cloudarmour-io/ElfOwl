@@ -52,28 +52,28 @@ type Agent struct {
 	MetricsRegistry *metrics.Registry
 
 	// Control channels
-	done               chan struct{}
-	eventsChan         chan interface{}
-	startTime          time.Time
+	done       chan struct{}
+	eventsChan chan interface{}
+	startTime  time.Time
 
 	// ANCHOR: Mutex-protected counters for goroutine safety - Dec 26, 2025
 	// Multiple event handler goroutines (process, network, file, capability) access
 	// eventsProcessed and violationsFound concurrently. Mutex ensures atomic increments.
-	metricsMutex       sync.Mutex
-	eventsProcessed    int64
-	violationsFound    int64
+	metricsMutex    sync.Mutex
+	eventsProcessed int64
+	violationsFound int64
 }
 
 // HealthStatus represents the agent's health status
 type HealthStatus struct {
-	AgentVersion     string            `json:"agent_version"`
-	Uptime           time.Duration     `json:"uptime"`
-	Monitors         map[string]bool   `json:"monitors"`
-	EventsProcessed  int64             `json:"events_processed"`
-	ViolationsFound  int64             `json:"violations_found"`
-	LastPushTime     time.Time         `json:"last_push_time"`
-	PushFailureCount int64             `json:"push_failure_count"`
-	Status           string            `json:"status"`
+	AgentVersion     string          `json:"agent_version"`
+	Uptime           time.Duration   `json:"uptime"`
+	Monitors         map[string]bool `json:"monitors"`
+	EventsProcessed  int64           `json:"events_processed"`
+	ViolationsFound  int64           `json:"violations_found"`
+	LastPushTime     time.Time       `json:"last_push_time"`
+	PushFailureCount int64           `json:"push_failure_count"`
+	Status           string          `json:"status"`
 }
 
 // ANCHOR: Monitor bootstrapping fallback - Phase 3.5 Week 4
@@ -146,11 +146,11 @@ func NewAgent(config *Config) (*Agent, error) {
 	// Supports loading rules from YAML file, Kubernetes ConfigMap, or hardcoded defaults
 	// Fallback chain: file (if configured) → ConfigMap (if configured) → hardcoded CISControls
 	engineConfig := &rules.EngineConfig{
-		RuleFilePath:      config.Agent.Rules.FilePath,
-		ConfigMapName:     config.Agent.Rules.ConfigMap.Name,
+		RuleFilePath:       config.Agent.Rules.FilePath,
+		ConfigMapName:      config.Agent.Rules.ConfigMap.Name,
 		ConfigMapNamespace: config.Agent.Rules.ConfigMap.Namespace,
-		K8sClientset:      k8sClient.GetClientset(), // Pass K8s client for ConfigMap API access
-		Ctx:               context.Background(),
+		K8sClientset:       k8sClient.GetClientset(), // Pass K8s client for ConfigMap API access
+		Ctx:                context.Background(),
 	}
 	ruleEngine, err := rules.NewEngineWithConfig(engineConfig)
 	if err != nil {
@@ -296,6 +296,13 @@ func (a *Agent) Start(ctx context.Context) error {
 	go a.handleDNSEvents(ctx)
 	go a.handleFileEvents(ctx)
 	go a.handleCapabilityEvents(ctx)
+
+	// ANCHOR: Start K8s compliance watchers - Feature: pod_spec_check/network_policy_check - Mar 22, 2026
+	// Watches K8s API objects and emits compliance events for rules that are not
+	// driven by eBPF runtime telemetry (e.g., pod_spec_check, network_policy_check).
+	if a.K8sClient != nil {
+		go a.startComplianceWatchers(ctx)
+	}
 
 	// Launch API push goroutine
 	go a.pushEvents(ctx)
@@ -571,6 +578,35 @@ func (a *Agent) handleCapabilityEvents(ctx context.Context) {
 	}
 }
 
+// handleComplianceEvent processes non-eBPF compliance events (pod specs, network policies).
+// ANCHOR: Shared compliance event handler - Feature: K8s API compliance signals - Mar 22, 2026
+// Keeps rule evaluation and buffering consistent across eBPF and K8s API event sources.
+func (a *Agent) handleComplianceEvent(ctx context.Context, event *enrichment.EnrichedEvent) {
+	if event == nil {
+		return
+	}
+
+	violations := a.RuleEngine.Match(event)
+	if len(violations) > 0 {
+		a.metricsMutex.Lock()
+		a.violationsFound += int64(len(violations))
+		a.metricsMutex.Unlock()
+		a.MetricsRegistry.RecordViolationsFound(len(violations))
+	}
+
+	a.EventBuffer.Enqueue(event, violations)
+	a.metricsMutex.Lock()
+	a.eventsProcessed++
+	a.metricsMutex.Unlock()
+	a.MetricsRegistry.RecordEventProcessed()
+
+	select {
+	case <-ctx.Done():
+		return
+	default:
+	}
+}
+
 // pushEvents periodically pushes buffered events to Owl SaaS
 func (a *Agent) pushEvents(ctx context.Context) {
 	ticker := time.NewTicker(a.Config.Agent.OWL.Push.BatchTimeout)
@@ -716,11 +752,11 @@ func (a *Agent) Health() HealthStatus {
 		LastPushTime:     a.APIClient.LastPushTime(),
 		PushFailureCount: a.APIClient.FailureCount(),
 		Monitors: map[string]bool{
-			"process":     a.ProcessMonitor != nil,
-			"network":     a.NetworkMonitor != nil,
-			"dns":         a.DNSMonitor != nil, // DNS monitor now available via cilium/ebpf
-			"file":        a.FileMonitor != nil,
-			"capability":  a.CapabilityMonitor != nil,
+			"process":    a.ProcessMonitor != nil,
+			"network":    a.NetworkMonitor != nil,
+			"dns":        a.DNSMonitor != nil, // DNS monitor now available via cilium/ebpf
+			"file":       a.FileMonitor != nil,
+			"capability": a.CapabilityMonitor != nil,
 		},
 	}
 }
