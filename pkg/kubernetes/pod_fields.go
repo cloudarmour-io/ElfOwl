@@ -124,6 +124,8 @@ func KernelHardeningFromPod(pod *corev1.Pod) bool {
 	return false
 }
 
+// ANCHOR: Annotation/label lookup helper - Utility: container-scoped keys - Mar 22, 2026
+// Checks annotations/labels for base and container-qualified keys.
 func podStringValue(pod *corev1.Pod, baseKey, containerName string) (string, bool) {
 	keys := annotationKeys(baseKey, containerName)
 	for _, key := range keys {
@@ -139,6 +141,8 @@ func podStringValue(pod *corev1.Pod, baseKey, containerName string) (string, boo
 	return "", false
 }
 
+// ANCHOR: Boolean annotation parsing - Utility: typed compliance flags - Mar 22, 2026
+// Parses boolean values from annotations/labels for compliance fields.
 func podBoolValue(pod *corev1.Pod, baseKey, containerName string) (bool, bool) {
 	value, ok := podStringValue(pod, baseKey, containerName)
 	if !ok {
@@ -147,6 +151,8 @@ func podBoolValue(pod *corev1.Pod, baseKey, containerName string) (bool, bool) {
 	return parseBoolValue(value)
 }
 
+// ANCHOR: Container-specific annotation keys - Utility: flexible key formats - Mar 22, 2026
+// Supports base, dotted, and slash-qualified container keys.
 func annotationKeys(baseKey, containerName string) []string {
 	keys := []string{baseKey}
 	if containerName == "" {
@@ -157,6 +163,8 @@ func annotationKeys(baseKey, containerName string) []string {
 	return keys
 }
 
+// ANCHOR: Boolean value normalization - Utility: annotation parsing - Mar 22, 2026
+// Accepts common truthy/falsey strings including signed/unsigned.
 func parseBoolValue(value string) (bool, bool) {
 	normalized := strings.TrimSpace(strings.ToLower(value))
 	switch normalized {
@@ -169,6 +177,8 @@ func parseBoolValue(value string) (bool, bool) {
 	}
 }
 
+// ANCHOR: Volume source classification - Utility: volume type mapping - Mar 22, 2026
+// Maps Kubernetes volume sources to normalized type strings.
 func volumeSourceType(volume corev1.Volume) string {
 	switch {
 	case volume.HostPath != nil:
