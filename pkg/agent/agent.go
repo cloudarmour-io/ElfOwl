@@ -304,8 +304,11 @@ func (a *Agent) Start(ctx context.Context) error {
 		go a.startComplianceWatchers(ctx)
 	}
 
-	// Launch API push goroutine
-	go a.pushEvents(ctx)
+	// ANCHOR: Respect owl_api.push.enabled - Bugfix: prevent unintended push loop - Mar 22, 2026
+	// Only start the push goroutine when explicitly enabled in config.
+	if a.Config.Agent.OWL.Push.Enabled {
+		go a.pushEvents(ctx)
+	}
 
 	// Launch periodic metrics collector
 	go a.collectMetrics(ctx)
