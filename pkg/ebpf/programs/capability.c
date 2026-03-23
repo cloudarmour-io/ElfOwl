@@ -1,50 +1,52 @@
-// ANCHOR: Capability Monitor eBPF Program - Dec 27, 2025
-// Kernel-native Linux capability usage monitoring
-// Captures dangerous capability usage for CIS 4.5.3 controls
+// ANCHOR: Capability Monitor eBPF Program - Mar 23, 2026
+// Captures high-risk capability path via sys_enter_mount (CAP_SYS_ADMIN).
 
-#include <uapi/linux/ptrace.h>
 #include <linux/bpf.h>
+#include <linux/types.h>
+#include <bpf/bpf_helpers.h>
 
-// Capability constants (from include/uapi/linux/capability.h)
-#define CAP_SYS_ADMIN       21
-#define CAP_SYS_MODULE      16
-#define CAP_SYS_BOOT        23
-#define CAP_SYS_PTRACE      19
-
-// Event structure matching enrichment.CapabilityUsage
-struct capability_event {
-    unsigned int pid;
-    unsigned int capability;    // CAP_* constant
-    unsigned char check_type;   // check=1, use=2
-    unsigned long cgroup_id;
-    char syscall_name[32];
+struct sys_enter_mount_ctx {
+	__u16 common_type;
+	__u8 common_flags;
+	__u8 common_preempt_count;
+	__s32 common_pid;
+	long __syscall_nr;
+	const char *dev_name;
+	const char *dir_name;
+	const char *type;
+	unsigned long flags;
+	const void *data;
 };
 
-// Perf buffer for sending events to userspace
-BPF_PERF_OUTPUT(capability_events);
+// Capability constants (include/uapi/linux/capability.h).
+#define CAP_SYS_ADMIN 21
 
-// Tracepoint: trace_cap_capable (capability check)
-// Fires when kernel checks for process capability
-TRACEPOINT_PROBE(capability, cap_capable) {
-    struct capability_event evt = {};
+// Event layout must match pkg/ebpf/types.go: CapabilityEvent.
+struct capability_event {
+	__u32 pid;
+	__u32 capability;
+	__u8 check_type;
+	__u64 cgroup_id;
+	char syscall_name[32];
+} __attribute__((packed));
 
-    evt.pid = bpf_get_current_pid_tgid() >> 32;
-    evt.check_type = 1;  // capability check
-    evt.cgroup_id = bpf_get_current_cgroup_id();
+struct {
+	__uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
+} capability_events SEC(".maps");
 
-    // ANCHOR: Capability tracepoint extraction - Feature: cap id/cgroup/comm - Mar 23, 2026
-    // Captures capability ID, cgroup ID, and process comm for CIS 4.5.3.
-    // Filters to high-risk capabilities to reduce noise.
-    evt.capability = args->cap;
-    bpf_get_current_comm(&evt.syscall_name, sizeof(evt.syscall_name));
+SEC("tracepoint/syscalls/sys_enter_mount")
+int capability_monitor(struct sys_enter_mount_ctx *ctx)
+{
+	struct capability_event evt = {};
 
-    if (evt.capability != CAP_SYS_ADMIN &&
-        evt.capability != CAP_SYS_MODULE &&
-        evt.capability != CAP_SYS_BOOT &&
-        evt.capability != CAP_SYS_PTRACE) {
-        return 0;
-    }
+	evt.pid = bpf_get_current_pid_tgid() >> 32;
+	evt.capability = CAP_SYS_ADMIN;
+	evt.check_type = 1;
+	evt.cgroup_id = bpf_get_current_cgroup_id();
+	__builtin_memcpy(evt.syscall_name, "mount", 6);
 
-    capability_events.perf_submit(args, &evt, sizeof(evt));
-    return 0;
+	bpf_perf_event_output(ctx, &capability_events, BPF_F_CURRENT_CPU, &evt, sizeof(evt));
+	return 0;
 }
+
+char LICENSE[] SEC("license") = "GPL";

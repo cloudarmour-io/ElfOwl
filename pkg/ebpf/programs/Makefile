@@ -1,25 +1,23 @@
-# ANCHOR: eBPF Program Build System - Dec 27, 2025
-# Compiles eBPF C programs using Cilium/eBPF patterns
-# Output: .o bytecode files for LoadPrograms() in pkg/ebpf/loader.go
+# ANCHOR: eBPF Program Build System - Dec 27, 2025 / Mar 23, 2026
+# Builds libbpf-style tracepoint programs for embed + cilium/ebpf loading.
 
 CLANG ?= clang
-LLC ?= llc
-CFLAGS := -O2 -target bpf
 OUTPUT := bin
+ARCH := $(shell uname -m)
+ARCH_INCLUDE := /usr/include/$(ARCH)-linux-gnu
+TARGET_ARCH ?= x86
+CFLAGS := -O2 -g -target bpf -D__TARGET_ARCH_$(TARGET_ARCH) -I$(ARCH_INCLUDE)
 
-# All eBPF programs
 TARGETS := $(OUTPUT)/process.o $(OUTPUT)/network.o $(OUTPUT)/file.o \
-           $(OUTPUT)/capability.o $(OUTPUT)/dns.o
+	$(OUTPUT)/capability.o $(OUTPUT)/dns.o
 
 .PHONY: all clean
 
 all: $(OUTPUT) $(TARGETS)
 
-# Create output directory
 $(OUTPUT):
 	mkdir -p $(OUTPUT)
 
-# Compile eBPF C program to bytecode
 $(OUTPUT)/%.o: %.c | $(OUTPUT)
 	$(CLANG) $(CFLAGS) -c $< -o $@
 

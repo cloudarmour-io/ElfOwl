@@ -146,16 +146,16 @@ func programDefinitions(opts LoadOptions) []programDefinition {
 			Name:            ProcessProgramName,
 			Description:     "process execution",
 			MapName:         ProcessEventsMap,
-			TracepointGroup: "sched",
-			TracepointName:  "sched_process_exec",
+			TracepointGroup: "syscalls",
+			TracepointName:  "sys_enter_execve",
 			Config:          opts.Process,
 		},
 		{
 			Name:            NetworkProgramName,
 			Description:     "network connections",
 			MapName:         NetworkEventsMap,
-			TracepointGroup: "tcp",
-			TracepointName:  "tcp_connect",
+			TracepointGroup: "syscalls",
+			TracepointName:  "sys_enter_connect",
 			Config:          opts.Network,
 		},
 		{
@@ -170,16 +170,16 @@ func programDefinitions(opts LoadOptions) []programDefinition {
 			Name:            CapabilityProgramName,
 			Description:     "linux capabilities",
 			MapName:         CapabilityEventsMap,
-			TracepointGroup: "capability",
-			TracepointName:  "cap_capable",
+			TracepointGroup: "syscalls",
+			TracepointName:  "sys_enter_mount",
 			Config:          opts.Capability,
 		},
 		{
 			Name:            DNSProgramName,
 			Description:     "DNS queries",
 			MapName:         DNSEventsMap,
-			TracepointGroup: "udp",
-			TracepointName:  "udp_sendmsg",
+			TracepointGroup: "syscalls",
+			TracepointName:  "sys_enter_sendto",
 			Config:          opts.DNS,
 		},
 	}
@@ -217,10 +217,10 @@ func loadProgramSet(logger *zap.Logger, def programDefinition, opts LoadOptions)
 		return nil, fmt.Errorf("no tracepoint program found in %s", def.Name)
 	}
 
-	tp, err := link.Tracepoint(def.TracepointGroup, def.TracepointName, prog, nil)
+	tp, err := attachProgram(def, prog)
 	if err != nil {
 		collection.Close()
-		return nil, fmt.Errorf("attach tracepoint %s/%s: %w", def.TracepointGroup, def.TracepointName, err)
+		return nil, fmt.Errorf("attach program to %s/%s: %w", def.TracepointGroup, def.TracepointName, err)
 	}
 
 	mapName, eventMap := selectEventMap(collection.Maps, def.MapName)
@@ -238,10 +238,15 @@ func loadProgramSet(logger *zap.Logger, def programDefinition, opts LoadOptions)
 	}
 
 	if logger != nil {
+		attachKind := "tracepoint"
+		if prog.Type() == ebpf.RawTracepoint {
+			attachKind = "raw_tracepoint"
+		}
 		logger.Info("loaded eBPF program",
 			zap.String("program", def.Name),
 			zap.String("section", progName),
 			zap.String("map", mapName),
+			zap.String("attach_type", attachKind),
 			zap.String("tracepoint", fmt.Sprintf("%s/%s", def.TracepointGroup, def.TracepointName)),
 		)
 	}
@@ -264,11 +269,34 @@ func selectTracepointProgram(programs map[string]*ebpf.Program) (string, *ebpf.P
 		}
 	}
 	for name, prog := range programs {
+		if prog != nil && prog.Type() == ebpf.RawTracepoint {
+			return name, prog
+		}
+	}
+	for name, prog := range programs {
 		if prog != nil {
 			return name, prog
 		}
 	}
 	return "", nil
+}
+
+func attachProgram(def programDefinition, prog *ebpf.Program) (link.Link, error) {
+	if prog == nil {
+		return nil, fmt.Errorf("program is nil")
+	}
+
+	switch prog.Type() {
+	case ebpf.TracePoint:
+		return link.Tracepoint(def.TracepointGroup, def.TracepointName, prog, nil)
+	case ebpf.RawTracepoint:
+		return link.AttachRawTracepoint(link.RawTracepointOptions{
+			Name:    def.TracepointName,
+			Program: prog,
+		})
+	default:
+		return nil, fmt.Errorf("unsupported attach type %s", prog.Type())
+	}
 }
 
 // ANCHOR: Event map selection - Utility: perf/ringbuf map lookup - Mar 23, 2026
