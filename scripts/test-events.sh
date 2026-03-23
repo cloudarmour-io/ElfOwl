@@ -56,6 +56,7 @@ run_test() {
     set -euo pipefail
     export PATH=/usr/local/go/bin:\$PATH
     cd '$VM_PROJECT_DIR'
+    mkdir -p '$RESULTS_DIR'
     rm -f '$status_file'
     GOCACHE=/tmp/elf-owl-gocache GOMODCACHE=/tmp/elf-owl-gomodcache ${cmd} | tee '$RESULTS_DIR/${name}.log'
     status=\${PIPESTATUS[0]}
@@ -78,9 +79,8 @@ KERNEL_STATUS="SKIPPED"
 if [[ "$RUN_KERNEL" -eq 1 ]]; then
   echo "[test] Running kernel eBPF event tests..."
   kernel_args=(--name "$VM_NAME" --project-dir "$VM_PROJECT_DIR")
-  if [[ "$SYNC" -eq 1 ]]; then
-    kernel_args+=(--sync)
-  fi
+  # Source was already synced above when --sync is set.
+  # A second sync here would replace the VM project directory and remove RESULTS_DIR.
   if "$SCRIPT_DIR/test-ebpf-kernel.sh" "${kernel_args[@]}"; then
     KERNEL_STATUS=0
   else
