@@ -5,10 +5,13 @@
 package ebpf
 
 import (
+	"bytes"
 	"embed"
 	"fmt"
+	"time"
 
 	"github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/link"
 	"go.uber.org/zap"
 )
 
@@ -43,8 +46,43 @@ type ProgramSet struct {
 	// nil if program doesn't produce events (e.g., helper-only programs)
 	Reader Reader
 
+	// ANCHOR: ProgramSet link handles - Feature: tracepoint detach - Mar 23, 2026
+	// Track attached links so programs are cleanly detached on shutdown.
+	Links []link.Link
+
 	// Logger for diagnostics
 	Logger *zap.Logger
+}
+
+// ProgramConfig controls per-program loading and reader settings.
+type ProgramConfig struct {
+	Enabled    bool
+	BufferSize int
+	Timeout    time.Duration
+}
+
+// PerfBufferOptions controls perf buffer reader configuration.
+type PerfBufferOptions struct {
+	Enabled     bool
+	PageCount   int
+	LostHandler bool
+}
+
+// RingBufferOptions controls ring buffer reader configuration.
+type RingBufferOptions struct {
+	Enabled bool
+	Size    int
+}
+
+// LoadOptions defines which programs to load and how to configure readers.
+type LoadOptions struct {
+	Process    ProgramConfig
+	Network    ProgramConfig
+	File       ProgramConfig
+	Capability ProgramConfig
+	DNS        ProgramConfig
+	PerfBuffer PerfBufferOptions
+	RingBuffer RingBufferOptions
 }
 
 // ============================================================================
@@ -76,6 +114,164 @@ type Collection struct {
 	bytecode map[string][]byte
 }
 
+type programDefinition struct {
+	Name            string
+	Description     string
+	MapName         string
+	TracepointGroup string
+	TracepointName  string
+	Config          ProgramConfig
+}
+
+// DefaultLoadOptions enables all programs with perf buffers by default.
+func DefaultLoadOptions() LoadOptions {
+	return LoadOptions{
+		Process:    ProgramConfig{Enabled: true},
+		Network:    ProgramConfig{Enabled: true},
+		File:       ProgramConfig{Enabled: true},
+		Capability: ProgramConfig{Enabled: true},
+		DNS:        ProgramConfig{Enabled: true},
+		PerfBuffer: PerfBufferOptions{Enabled: true, PageCount: 64, LostHandler: true},
+		RingBuffer: RingBufferOptions{Enabled: false, Size: 65536},
+	}
+}
+
+func programDefinitions(opts LoadOptions) []programDefinition {
+	return []programDefinition{
+		{
+			Name:            ProcessProgramName,
+			Description:     "process execution",
+			MapName:         ProcessEventsMap,
+			TracepointGroup: "sched",
+			TracepointName:  "sched_process_exec",
+			Config:          opts.Process,
+		},
+		{
+			Name:            NetworkProgramName,
+			Description:     "network connections",
+			MapName:         NetworkEventsMap,
+			TracepointGroup: "tcp",
+			TracepointName:  "tcp_connect",
+			Config:          opts.Network,
+		},
+		{
+			Name:            FileProgramName,
+			Description:     "file access",
+			MapName:         FileEventsMap,
+			TracepointGroup: "syscalls",
+			TracepointName:  "sys_enter_openat",
+			Config:          opts.File,
+		},
+		{
+			Name:            CapabilityProgramName,
+			Description:     "linux capabilities",
+			MapName:         CapabilityEventsMap,
+			TracepointGroup: "capability",
+			TracepointName:  "cap_capable",
+			Config:          opts.Capability,
+		},
+		{
+			Name:            DNSProgramName,
+			Description:     "DNS queries",
+			MapName:         DNSEventsMap,
+			TracepointGroup: "udp",
+			TracepointName:  "udp_sendmsg",
+			Config:          opts.DNS,
+		},
+	}
+}
+
+// ANCHOR: Load single eBPF program set - Feature: tracepoint attach - Mar 23, 2026
+// Parses bytecode, loads the collection, attaches tracepoint, and returns ProgramSet.
+func loadProgramSet(logger *zap.Logger, def programDefinition) (*ProgramSet, error) {
+	data, err := GetProgram(def.Name)
+	if err != nil {
+		return nil, fmt.Errorf("get bytecode: %w", err)
+	}
+
+	if len(data) < 64 {
+		return nil, fmt.Errorf("bytecode too small for valid ELF")
+	}
+
+	if data[0] != 0x7f || data[1] != 'E' || data[2] != 'L' || data[3] != 'F' {
+		return nil, fmt.Errorf("invalid ELF magic in bytecode")
+	}
+
+	spec, err := ebpf.LoadCollectionSpecFromReader(bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("parse bytecode: %w", err)
+	}
+
+	collection, err := ebpf.NewCollection(spec)
+	if err != nil {
+		return nil, fmt.Errorf("load collection: %w", err)
+	}
+
+	progName, prog := selectTracepointProgram(collection.Programs)
+	if prog == nil {
+		return nil, fmt.Errorf("no tracepoint program found in %s", def.Name)
+	}
+
+	tp, err := link.Tracepoint(def.TracepointGroup, def.TracepointName, prog, nil)
+	if err != nil {
+		return nil, fmt.Errorf("attach tracepoint %s/%s: %w", def.TracepointGroup, def.TracepointName, err)
+	}
+
+	mapName, eventMap := selectEventMap(collection.Maps, def.MapName)
+	if eventMap == nil {
+		return nil, fmt.Errorf("event map %s not found", def.MapName)
+	}
+
+	if logger != nil {
+		logger.Info("loaded eBPF program",
+			zap.String("program", def.Name),
+			zap.String("section", progName),
+			zap.String("map", mapName),
+			zap.String("tracepoint", fmt.Sprintf("%s/%s", def.TracepointGroup, def.TracepointName)),
+		)
+	}
+
+	return &ProgramSet{
+		Program: prog,
+		Maps:    map[string]*ebpf.Map{mapName: eventMap},
+		Links:   []link.Link{tp},
+		Logger:  logger,
+	}, nil
+}
+
+// ANCHOR: Tracepoint program selection - Utility: pick tracepoint program - Mar 23, 2026
+// Prefers tracepoint program types and falls back to any available program.
+func selectTracepointProgram(programs map[string]*ebpf.Program) (string, *ebpf.Program) {
+	for name, prog := range programs {
+		if prog != nil && prog.Type() == ebpf.TracePoint {
+			return name, prog
+		}
+	}
+	for name, prog := range programs {
+		if prog != nil {
+			return name, prog
+		}
+	}
+	return "", nil
+}
+
+// ANCHOR: Event map selection - Utility: perf/ringbuf map lookup - Mar 23, 2026
+// Chooses the preferred map name or the first perf/ringbuf map in the collection.
+func selectEventMap(maps map[string]*ebpf.Map, preferred string) (string, *ebpf.Map) {
+	if m, ok := maps[preferred]; ok {
+		return preferred, m
+	}
+	for name, m := range maps {
+		if m == nil {
+			continue
+		}
+		if m.Type() == ebpf.PerfEventArray || m.Type() == ebpf.RingBuf {
+			return name, m
+		}
+	}
+	return "", nil
+}
+
 // ============================================================================
 // LoadPrograms - Main entry point for loading eBPF programs
 // ============================================================================
@@ -90,78 +286,45 @@ type Collection struct {
 // 4. Wrap in ProgramSet with Reader for event streaming
 // 5. Return Collection for agent to use
 func LoadPrograms(logger *zap.Logger) (*Collection, error) {
-	// ANCHOR: Load all eBPF programs from bytecode - Dec 27, 2025
-	// Loads compiled ELF bytecode for all 5 monitors into kernel
+	return LoadProgramsWithOptions(logger, DefaultLoadOptions())
+}
 
+// ANCHOR: eBPF program loading and tracepoint attach - Feature: kernel attach - Mar 23, 2026
+// Loads ELF bytecode, attaches tracepoints, and returns program sets for monitors.
+func LoadProgramsWithOptions(logger *zap.Logger, opts LoadOptions) (*Collection, error) {
 	coll := &Collection{
 		Logger:   logger,
 		bytecode: make(map[string][]byte),
 	}
 
-	// Load bytecode for each program from embedded files
-	logger.Info("loading eBPF programs from embedded bytecode")
-
-	// ANCHOR: Load all eBPF programs - Dec 27, 2025
-	// Verifies all bytecode files are available and can be parsed
-	// Actual kernel loading requires CAP_BPF, CAP_PERFMON, and valid kernel eBPF support
-
-	programs := map[string]string{
-		ProcessProgramName:    "process execution",
-		NetworkProgramName:    "network connections",
-		FileProgramName:       "file access",
-		CapabilityProgramName: "Linux capabilities",
-		DNSProgramName:        "DNS queries",
+	if logger != nil {
+		logger.Info("loading eBPF programs from embedded bytecode")
 	}
 
-	loadedCount := 0
-	for progName, progDesc := range programs {
-		data, err := GetProgram(progName)
+	definitions := programDefinitions(opts)
+	for _, def := range definitions {
+		if !def.Config.Enabled {
+			continue
+		}
+
+		programSet, err := loadProgramSet(logger, def)
 		if err != nil {
-			logger.Warn("program bytecode not available",
-				zap.String("program", progName),
-				zap.String("description", progDesc),
-				zap.Error(err))
-			continue
+			return nil, fmt.Errorf("load %s: %w", def.Name, err)
 		}
 
-		// Verify bytecode is valid ELF format
-		if len(data) < 64 {
-			logger.Warn("bytecode too small for valid ELF",
-				zap.String("program", progName),
-				zap.Int("size", len(data)))
-			continue
+		switch def.Name {
+		case ProcessProgramName:
+			coll.Process = programSet
+		case NetworkProgramName:
+			coll.Network = programSet
+		case FileProgramName:
+			coll.File = programSet
+		case CapabilityProgramName:
+			coll.Capability = programSet
+		case DNSProgramName:
+			coll.DNS = programSet
 		}
-
-		// Check ELF magic number
-		if data[0] != 0x7f || data[1] != 'E' || data[2] != 'L' || data[3] != 'F' {
-			logger.Warn("invalid ELF magic in bytecode",
-				zap.String("program", progName))
-			continue
-		}
-
-		// Log successful bytecode verification
-		logger.Info("program bytecode verified",
-			zap.String("program", progName),
-			zap.String("description", progDesc),
-			zap.Int("bytecodeSize", len(data)))
-
-		loadedCount++
-
-		// TODO (Phase 3): Actually load into kernel
-		// Requires:
-		// 1. Write bytecode to temp file (LoadCollectionSpec takes file path)
-		// 2. Parse with ebpf.LoadCollectionSpec(tmpFile)
-		// 3. Load programs via spec.LoadAndAssign()
-		// 4. Attach programs to kernel tracepoints
-		// 5. Create ProgramSet with event readers
-		//
-		// For now, we verify bytecode availability and format
 	}
-
-	logger.Info("eBPF program loading verification complete",
-		zap.Int("loaded", loadedCount),
-		zap.Int("total", len(programs)),
-		zap.String("note", "Phase 3 will implement actual kernel loading"))
 
 	return coll, nil
 }
@@ -233,6 +396,17 @@ func (ps *ProgramSet) Close() error {
 	if ps.Reader != nil {
 		if err := ps.Reader.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("close reader: %w", err))
+		}
+	}
+
+	// ANCHOR: Detach eBPF links before closing programs - Safety: avoid dangling tracepoints - Mar 23, 2026
+	// Close all attached links to detach programs from tracepoints.
+	for _, lnk := range ps.Links {
+		if lnk == nil {
+			continue
+		}
+		if err := lnk.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("close link: %w", err))
 		}
 	}
 
