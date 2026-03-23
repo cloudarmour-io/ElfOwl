@@ -114,11 +114,16 @@ type ProcessContext struct {
 }
 
 // FileContext captures file metadata from cilium/ebpf events
+// ANCHOR: File context extensions - Feature: mode + sensitive path - Mar 24, 2026
+// Adds mode and sensitivity flags for expanded file operation coverage.
 type FileContext struct {
 	Path      string `json:"path"`
 	Operation string `json:"operation"`
 	PID       uint32 `json:"pid"`
 	UID       uint32 `json:"uid"`
+	Mode      uint32 `json:"mode"`
+	FD        uint32 `json:"fd"`
+	Sensitive bool   `json:"sensitive"`
 }
 
 // CapabilityContext captures capability usage metadata

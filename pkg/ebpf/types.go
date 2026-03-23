@@ -69,10 +69,13 @@ type NetworkEvent struct {
 // ============================================================================
 
 type FileEvent struct {
+	CgroupID  uint64
 	PID       uint32
 	Flags     uint32 // Open flags (O_WRONLY, O_RDWR, etc.)
-	Operation uint8  // write=1, read=2, chmod=3, unlink=4
-	CgroupID  uint64
+	Mode      uint32
+	FD        uint32
+	Operation uint8 // write=1, read=2, chmod=3, unlink=4
+	Sensitive uint8
 	Filename  [256]byte
 	FlagsStr  [32]byte
 }
