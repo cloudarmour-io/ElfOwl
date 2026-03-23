@@ -1,9 +1,8 @@
 module github.com/udyansh/elf-owl
 
-go 1.19
+go 1.23.0
 
 require (
-
 	// eBPF monitoring via Cilium/ebpf (production-grade, maintained)
 	// Phase 3: Removed goBPF dependency (Dec 27, 2025)
 	github.com/cilium/ebpf v0.11.0

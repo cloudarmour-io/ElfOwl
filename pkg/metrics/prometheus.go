@@ -66,9 +66,23 @@ func (r *Registry) RecordEventProcessed() {
 	r.eventsProcessed.Inc()
 }
 
-// RecordViolationFound records that a violation was found
+// RecordViolationFound records that a single violation was found
 func (r *Registry) RecordViolationFound() {
 	r.violationsFound.Inc()
+}
+
+// RecordViolationsFound records n violations at once.
+//
+// ANCHOR: Batch violation counter - Medium finding fix - Feb 18, 2026
+// WHY: RecordViolationFound() was called once per event even when the rule
+//      engine matched multiple violations, causing elf_owl_violations_found_total
+//      to undercount by (n-1) for every multi-violation event.
+// WHAT: Use Counter.Add(n) to increment by the actual number of violations.
+// HOW: prometheus.Counter.Add() is the idiomatic batch-increment API.
+func (r *Registry) RecordViolationsFound(n int) {
+	if n > 0 {
+		r.violationsFound.Add(float64(n))
+	}
 }
 
 // SetEventsBuffered sets the current number of buffered events

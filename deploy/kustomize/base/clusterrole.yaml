@@ -1,0 +1,29 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: elf-owl
+  labels:
+    app: elf-owl
+rules:
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["serviceaccounts"]
+    verbs: ["get", "list"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["get", "list"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "clusterroles", "rolebindings", "clusterrolebindings"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
+  # Read elf-owl-rules ConfigMap for rule engine configuration
+  # ANCHOR: configmaps RBAC - High finding fix - Feb 18, 2026
+  # WHY: Rule loader reads elf-owl-rules ConfigMap at startup; missing this
+  #      permission causes a 403 and falls back to built-in CIS rules only.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list"]
