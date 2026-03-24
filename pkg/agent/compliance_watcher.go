@@ -166,9 +166,9 @@ func (a *Agent) buildPodSpecEventForContainer(pod *corev1.Pod, container corev1.
 	memoryLimit, cpuLimit := resourceLimits(container)
 	memoryRequest, cpuRequest, storageRequest := resourceRequests(container)
 
-	serviceAccount := pod.Spec.ServiceAccountName
-	if serviceAccount == "" {
-		serviceAccount = "default"
+	serviceAccountName := pod.Spec.ServiceAccountName
+	if serviceAccountName == "" {
+		serviceAccountName = "default"
 	}
 
 	k8sCtx := &enrichment.K8sContext{
@@ -177,7 +177,7 @@ func (a *Agent) buildPodSpecEventForContainer(pod *corev1.Pod, container corev1.
 		Namespace:      pod.Namespace,
 		PodName:        pod.Name,
 		PodUID:         string(pod.UID),
-		ServiceAccount: serviceAccount,
+		ServiceAccount: serviceAccountName,
 		Image:          image,
 		ImageRegistry:  parseImageRegistry(image),
 		ImageTag:       parseImageTag(image),

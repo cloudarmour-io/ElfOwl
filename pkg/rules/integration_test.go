@@ -217,7 +217,7 @@ func TestIntegrationFileAccessViolation(t *testing.T) {
 	engine, _ := NewEngine()
 
 	event := &enrichment.EnrichedEvent{
-		EventType: "file_write", // Correct event type - matches CIS_4.5.5
+		EventType: "file_access", // Must match CIS_4.5.5 event types
 		File: &enrichment.FileContext{
 			Path:      "/etc", // Path must match CIS_4.5.5 allowlist to trigger rule
 			Operation: "write",

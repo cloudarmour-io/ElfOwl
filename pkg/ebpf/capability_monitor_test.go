@@ -92,7 +92,7 @@ func TestCapabilityMonitorStop(t *testing.T) {
 // ============================================================================
 
 func TestCapabilityEventParsing(t *testing.T) {
-	testEvent := NewTestCapabilityEvent(1234, 19, 2) // CAP_SYS_ADMIN, use
+	testEvent := NewTestCapabilityEvent(1234, 21, 2) // CAP_SYS_ADMIN, use
 
 	buf := &bytes.Buffer{}
 	err := binary.Write(buf, binary.LittleEndian, testEvent)
@@ -110,8 +110,8 @@ func TestCapabilityEventParsing(t *testing.T) {
 		t.Errorf("expected PID 1234, got %d", parsed.PID)
 	}
 
-	if parsed.Capability != 19 {
-		t.Errorf("expected Capability 19, got %d", parsed.Capability)
+	if parsed.Capability != 21 {
+		t.Errorf("expected Capability 21, got %d", parsed.Capability)
 	}
 
 	if parsed.CheckType != 2 {
@@ -136,37 +136,39 @@ func TestCapabilityNames(t *testing.T) {
 		{5, "CAP_KILL"},
 		{6, "CAP_SETGID"},
 		{7, "CAP_SETUID"},
-		{8, "CAP_SETFCAP"},
-		{9, "CAP_SETPCAP"},
-		{10, "CAP_NET_RAW"},
-		{11, "CAP_NET_BIND_SERVICE"},
+		{8, "CAP_SETPCAP"},
+		{9, "CAP_LINUX_IMMUTABLE"},
+		{10, "CAP_NET_BIND_SERVICE"},
+		{11, "CAP_NET_BROADCAST"},
 		{12, "CAP_NET_ADMIN"},
-		{13, "CAP_NET_BROADCAST"},
-		{14, "CAP_SYS_CHROOT"},
-		{15, "CAP_SYS_MODULE"},
-		{16, "CAP_SYS_PTRACE"},
+		{13, "CAP_NET_RAW"},
+		{14, "CAP_IPC_LOCK"},
+		{15, "CAP_IPC_OWNER"},
+		{16, "CAP_SYS_MODULE"},
 		{17, "CAP_SYS_RAWIO"},
-		{18, "CAP_SYS_PACCT"},
-		{19, "CAP_SYS_ADMIN"},
-		{20, "CAP_SYS_BOOT"},
-		{21, "CAP_SYS_NICE"},
-		{22, "CAP_SYS_RESOURCE"},
-		{23, "CAP_SYS_TIME"},
-		{24, "CAP_SYS_TTY_CONFIG"},
-		{25, "CAP_MKNOD"},
-		{26, "CAP_LEASE"},
-		{27, "CAP_AUDIT_WRITE"},
-		{28, "CAP_AUDIT_CONTROL"},
-		{29, "CAP_SETFATTR"},
-		{30, "CAP_MAC_OVERRIDE"},
-		{31, "CAP_MAC_ADMIN"},
-		{32, "CAP_SYSLOG"},
-		{33, "CAP_WAKE_ALARM"},
-		{34, "CAP_BLOCK_SUSPEND"},
-		{35, "CAP_AUDIT_READ"},
-		{36, "CAP_PERFMON"},
-		{37, "CAP_BPF"},
-		{38, "CAP_CHECKPOINT_RESTORE"},
+		{18, "CAP_SYS_CHROOT"},
+		{19, "CAP_SYS_PTRACE"},
+		{20, "CAP_SYS_PACCT"},
+		{21, "CAP_SYS_ADMIN"},
+		{22, "CAP_SYS_BOOT"},
+		{23, "CAP_SYS_NICE"},
+		{24, "CAP_SYS_RESOURCE"},
+		{25, "CAP_SYS_TIME"},
+		{26, "CAP_SYS_TTY_CONFIG"},
+		{27, "CAP_MKNOD"},
+		{28, "CAP_LEASE"},
+		{29, "CAP_AUDIT_WRITE"},
+		{30, "CAP_AUDIT_CONTROL"},
+		{31, "CAP_SETFCAP"},
+		{32, "CAP_MAC_OVERRIDE"},
+		{33, "CAP_MAC_ADMIN"},
+		{34, "CAP_SYSLOG"},
+		{35, "CAP_WAKE_ALARM"},
+		{36, "CAP_BLOCK_SUSPEND"},
+		{37, "CAP_AUDIT_READ"},
+		{38, "CAP_PERFMON"},
+		{39, "CAP_BPF"},
+		{40, "CAP_CHECKPOINT_RESTORE"},
 		{999, "CAP_UNKNOWN_999"},
 	}
 
@@ -185,7 +187,7 @@ func TestCapabilityNames(t *testing.T) {
 // ============================================================================
 
 func TestCapabilityEnrichment(t *testing.T) {
-	testEvent := NewTestCapabilityEvent(1234, 19, 2) // CAP_SYS_ADMIN, use
+	testEvent := NewTestCapabilityEvent(1234, 21, 2) // CAP_SYS_ADMIN, use
 
 	buf := &bytes.Buffer{}
 	binary.Write(buf, binary.LittleEndian, testEvent)
@@ -381,7 +383,7 @@ func BenchmarkCapabilityNameLookup(b *testing.B) {
 
 func BenchmarkCapabilityMonitorEnrichment(b *testing.B) {
 	for i := 0; i < b.N; i++ {
-		evt := NewTestCapabilityEvent(1234, 19, 2)
+		evt := NewTestCapabilityEvent(1234, 21, 2)
 
 		capName := capabilityName(evt.Capability)
 		allowed := evt.CheckType != 2

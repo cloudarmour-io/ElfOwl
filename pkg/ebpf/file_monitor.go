@@ -128,9 +128,6 @@ func (fm *FileMonitor) eventLoop(ctx context.Context) {
 				Path:      strings.TrimRight(string(evt.Filename[:]), "\x00"),
 				Operation: opType,
 				PID:       evt.PID,
-				Mode:      evt.Mode,
-				FD:        evt.FD,
-				Sensitive: evt.Sensitive == 1,
 			}
 
 			enriched := &enrichment.EnrichedEvent{
@@ -145,7 +142,9 @@ func (fm *FileMonitor) eventLoop(ctx context.Context) {
 			case fm.eventChan <- enriched:
 				fm.logger.Debug("file event sent",
 					zap.Uint32("pid", evt.PID),
-					zap.String("file", fileCtx.Path))
+					zap.String("file", fileCtx.Path),
+					zap.String("operation", fileCtx.Operation),
+					zap.Uint32("flags", evt.Flags))
 			case <-ctx.Done():
 				return
 			case <-fm.stopChan:

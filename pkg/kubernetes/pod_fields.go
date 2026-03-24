@@ -185,8 +185,6 @@ func volumeSourceType(volume corev1.Volume) string {
 		return "hostPath"
 	case volume.EmptyDir != nil:
 		return "emptyDir"
-	case volume.Local != nil:
-		return "local"
 	case volume.PersistentVolumeClaim != nil:
 		return "persistentVolumeClaim"
 	case volume.ConfigMap != nil:

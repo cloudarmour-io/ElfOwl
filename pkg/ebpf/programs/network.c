@@ -1,159 +1,96 @@
-// ANCHOR: Network Monitor eBPF Program - Dec 27, 2025
-// Kernel-native network connection monitoring
-// Captures socket connections for CIS 4.6 controls
+// ANCHOR: Network Monitor eBPF Program - Mar 23, 2026
+// Captures TCP connection activity via sys_enter_connect.
 
-#include "common.h"
+#include <linux/bpf.h>
+#include <linux/in.h>
+#include <linux/socket.h>
+#include <linux/types.h>
+#include <bpf/bpf_helpers.h>
+#include <bpf/bpf_endian.h>
 
-#define NET_DIR_UNKNOWN 0
-#define NET_DIR_OUTBOUND 1
-#define NET_DIR_INBOUND 2
-
-// Event structure matching enrichment.NetworkConnection
-struct network_event {
-	__u64 cgroup_id;
-	__u32 pid;
-	__u32 netns;
-	__u32 saddr;       // IPv4 source (host byte order)
-	__u32 daddr;       // IPv4 dest (host byte order)
-	__u16 family;      // AF_INET or AF_INET6
-	__u16 sport;       // Source port (host byte order)
-	__u16 dport;       // Destination port (host byte order)
-	__u8 protocol;     // IPPROTO_TCP or IPPROTO_UDP
-	__u8 direction;    // 1=outbound, 2=inbound
-	__u8 state;        // TCP state transition (newstate)
-	__u8 saddr_v6[16];
-	__u8 daddr_v6[16];
+struct sys_enter_connect_ctx {
+	__u16 common_type;
+	__u8 common_flags;
+	__u8 common_preempt_count;
+	__s32 common_pid;
+	long __syscall_nr;
+	long fd;
+	const struct sockaddr *uservaddr;
+	long addrlen;
 };
+
+// Event layout must match pkg/ebpf/types.go: NetworkEvent.
+struct network_event {
+	__u32 pid;
+	__u16 family;
+	__u16 sport;
+	__u16 dport;
+	__u32 saddr;
+	__u32 daddr;
+	__u8 protocol;
+	__u64 cgroup_id;
+} __attribute__((packed));
 
 struct {
 	__uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
 } network_events SEC(".maps");
 
-#ifndef TCP_ESTABLISHED
-#define TCP_ESTABLISHED 1
+#ifndef AF_INET
+#define AF_INET 2
 #endif
 
-#ifndef TCP_SYN_SENT
-#define TCP_SYN_SENT 2
+#ifndef IPPROTO_TCP
+#define IPPROTO_TCP 6
 #endif
 
-#ifndef TCP_SYN_RECV
-#define TCP_SYN_RECV 3
-#endif
+static __always_inline int read_ipv4_sockaddr(const struct sockaddr *uaddr, __u16 addr_len,
+					       __u16 *family, __u16 *dport, __u32 *daddr)
+{
+	struct sockaddr_in dst = {};
 
-static __always_inline __u16 net_ntohs(__u16 val) {
-	return bpf_ntohs(val);
-}
-
-static __always_inline __u32 pack_ipv4(const __u8 addr[4]) {
-	return ((__u32)addr[0]) |
-	       ((__u32)addr[1] << 8) |
-	       ((__u32)addr[2] << 16) |
-	       ((__u32)addr[3] << 24);
-}
-
-static __always_inline int read_sockaddr(const void *addr, __u16 *port, __u32 *daddr, __u8 daddr_v6[16], __u16 *family) {
-	struct sockaddr sa = {};
-	if (!addr) {
-		return 0;
+	if (!uaddr || addr_len < sizeof(dst)) {
+		return -1;
 	}
 
-	if (bpf_probe_read_user(&sa, sizeof(sa), addr) < 0) {
-		return 0;
+	if (bpf_probe_read_user(&dst, sizeof(dst), uaddr) < 0) {
+		return -1;
 	}
 
-	if (sa.sa_family == AF_INET) {
-		struct sockaddr_in sin = {};
-		if (bpf_probe_read_user(&sin, sizeof(sin), addr) < 0) {
-			return 0;
-		}
-		*family = AF_INET;
-		*port = net_ntohs(sin.sin_port);
-		*daddr = bpf_ntohl(sin.sin_addr.s_addr);
-		__builtin_memset(daddr_v6, 0, 16);
-		return AF_INET;
+	if (dst.sin_family != AF_INET) {
+		return -1;
 	}
 
-	if (sa.sa_family == AF_INET6) {
-		struct sockaddr_in6 sin6 = {};
-		if (bpf_probe_read_user(&sin6, sizeof(sin6), addr) < 0) {
-			return 0;
-		}
-		*family = AF_INET6;
-		*port = net_ntohs(sin6.sin6_port);
-		*daddr = 0;
-		bpf_probe_read_user(daddr_v6, sizeof(sin6.sin6_addr.in6_u.u6_addr8), &sin6.sin6_addr.in6_u.u6_addr8);
-		return AF_INET6;
-	}
-
+	*family = dst.sin_family;
+	*dport = bpf_ntohs(dst.sin_port);
+	*daddr = dst.sin_addr.s_addr;
 	return 0;
 }
 
-// ANCHOR: Network state/ipv6 capture - Feature: tcp+udp coverage - Mar 24, 2026
-// Uses inet_sock_set_state for TCP state transitions and sys_enter_sendto for UDP sends.
-SEC("tracepoint/sock/inet_sock_set_state")
-int tracepoint__sock__inet_sock_set_state(struct trace_event_raw_inet_sock_set_state *ctx) {
-	struct network_event evt = {};
-
-	evt.cgroup_id = bpf_get_current_cgroup_id();
-	evt.pid = current_pid();
-	evt.netns = current_netns_inum();
-	evt.protocol = (__u8)ctx->protocol;
-	evt.family = ctx->family;
-	evt.sport = ctx->sport;
-	evt.dport = ctx->dport;
-	evt.state = (__u8)ctx->newstate;
-	evt.direction = NET_DIR_UNKNOWN;
-
-	if (ctx->family == AF_INET6) {
-		__builtin_memcpy(evt.saddr_v6, ctx->saddr_v6, sizeof(evt.saddr_v6));
-		__builtin_memcpy(evt.daddr_v6, ctx->daddr_v6, sizeof(evt.daddr_v6));
-	} else {
-		evt.saddr = pack_ipv4(ctx->saddr);
-		evt.daddr = pack_ipv4(ctx->daddr);
-	}
-
-	if (ctx->newstate == TCP_SYN_SENT) {
-		evt.direction = NET_DIR_OUTBOUND;
-	} else if (ctx->newstate == TCP_SYN_RECV) {
-		evt.direction = NET_DIR_INBOUND;
-	} else if (ctx->oldstate == TCP_SYN_SENT && ctx->newstate == TCP_ESTABLISHED) {
-		evt.direction = NET_DIR_OUTBOUND;
-	} else if (ctx->oldstate == TCP_SYN_RECV && ctx->newstate == TCP_ESTABLISHED) {
-		evt.direction = NET_DIR_INBOUND;
-	}
-
-	SUBMIT_EVENT(ctx, network_events, &evt);
-	return 0;
-}
-
-SEC("tracepoint/raw_syscalls/sys_enter")
-int tracepoint__raw_syscalls__sys_enter(struct trace_event_raw_sys_enter *ctx) {
-	struct network_event evt = {};
-	__u16 port = 0;
+SEC("tracepoint/syscalls/sys_enter_connect")
+int network_monitor(struct sys_enter_connect_ctx *ctx)
+{
+	void *tp_ctx = ctx;
+	const struct sockaddr *dst_addr = ctx->uservaddr;
+	__u16 dst_len = (__u16)ctx->addrlen;
 	__u16 family = 0;
-	const void *addr = 0;
+	__u16 dport = 0;
+	__u32 daddr = 0;
+	struct network_event evt = {};
 
-	if (ctx->id != __NR_sendto) {
+	if (read_ipv4_sockaddr(dst_addr, dst_len, &family, &dport, &daddr) < 0) {
 		return 0;
 	}
 
-	evt.cgroup_id = bpf_get_current_cgroup_id();
-	evt.pid = current_pid();
-	evt.netns = current_netns_inum();
-	evt.protocol = IPPROTO_UDP;
-	evt.direction = NET_DIR_OUTBOUND;
-	evt.state = 0;
-
-	addr = (const void *)ctx->args[4];
-	if (!read_sockaddr(addr, &port, &evt.daddr, evt.daddr_v6, &family)) {
-		return 0;
-	}
-
+	evt.pid = bpf_get_current_pid_tgid() >> 32;
 	evt.family = family;
-	evt.dport = port;
+	evt.sport = 0;
+	evt.dport = dport;
+	evt.saddr = 0;
+	evt.daddr = daddr;
+	evt.protocol = IPPROTO_TCP;
+	evt.cgroup_id = bpf_get_current_cgroup_id();
 
-	SUBMIT_EVENT(ctx, network_events, &evt);
+	bpf_perf_event_output(tp_ctx, &network_events, BPF_F_CURRENT_CPU, &evt, sizeof(evt));
 	return 0;
 }
 
