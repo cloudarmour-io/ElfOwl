@@ -20,6 +20,8 @@ type Registry struct {
 	pushLatency       prometheus.Histogram
 	enrichmentErrors  prometheus.Counter
 	ruleMatchErrors   prometheus.Counter
+	// ANCHOR: Host event discard metric - Filter: K8s-native compliance - Mar 24, 2026
+	hostEventsDiscarded prometheus.Counter
 }
 
 // NewRegistry creates a new metrics registry
@@ -57,6 +59,11 @@ func NewRegistry() *Registry {
 		ruleMatchErrors: promauto.NewCounter(prometheus.CounterOpts{
 			Name: "elf_owl_rule_match_errors_total",
 			Help: "Total rule matching errors",
+		}),
+		// ANCHOR: Host event discard metric - Filter: K8s-native compliance - Mar 24, 2026
+		hostEventsDiscarded: promauto.NewCounter(prometheus.CounterOpts{
+			Name: "elf_owl_host_events_discarded_total",
+			Help: "Total host process events discarded due to kubernetes_only filter",
 		}),
 	}
 }
@@ -108,6 +115,12 @@ func (r *Registry) RecordPushLatency(seconds float64) {
 // RecordEnrichmentError records an enrichment error
 func (r *Registry) RecordEnrichmentError() {
 	r.enrichmentErrors.Inc()
+}
+
+// RecordHostEventDiscarded records a host event discarded by kubernetes_only filter
+// ANCHOR: Host event discard metric - Filter: K8s-native compliance - Mar 24, 2026
+func (r *Registry) RecordHostEventDiscarded() {
+	r.hostEventsDiscarded.Inc()
 }
 
 // RecordRuleMatchError records a rule matching error

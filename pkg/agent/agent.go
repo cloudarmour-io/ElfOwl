@@ -7,6 +7,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"sync"
@@ -404,11 +405,25 @@ func (a *Agent) handleProcessEvents(ctx context.Context) {
 			//      uses reflection to extract fields from the concrete event struct.
 			enrichedEvent, err := a.Enricher.EnrichProcessEvent(ctx, rawEnriched.RawEvent)
 			if err != nil {
-				a.Logger.Debug("process event enrichment failed, using partial event",
-					zap.Error(err))
-				// Fall back to partially-enriched event from monitor
-				enrichedEvent = rawEnriched
-				a.MetricsRegistry.RecordEnrichmentError()
+				// ANCHOR: Discard host events - Filter: K8s-native compliance - Mar 24, 2026
+				// ErrNoKubernetesContext = PID has no pod association.
+				// Honour kubernetes_only config: discard (true) or fall through to partial (false).
+				if errors.Is(err, enrichment.ErrNoKubernetesContext) {
+					if a.Config.Agent.Enrichment.KubernetesOnly {
+						a.Logger.Debug("discarded host process event: no pod context")
+						a.MetricsRegistry.RecordHostEventDiscarded()
+						continue
+					}
+					// kubernetes_only=false: process host event with monitor's partial enrichment
+					a.Logger.Debug("processing host process event (kubernetes_only disabled)")
+					enrichedEvent = rawEnriched
+				} else {
+					a.Logger.Debug("process event enrichment failed, using partial event",
+						zap.Error(err))
+					// Fall back to partially-enriched event from monitor
+					enrichedEvent = rawEnriched
+					a.MetricsRegistry.RecordEnrichmentError()
+				}
 			}
 
 			// Run through rule engine
@@ -466,10 +481,24 @@ func (a *Agent) handleNetworkEvents(ctx context.Context) {
 			// HOW: EnrichNetworkEvent queries K8s API using container ID from /proc cgroup.
 			enrichedEvent, err := a.Enricher.EnrichNetworkEvent(ctx, rawEnriched.RawEvent)
 			if err != nil {
-				a.Logger.Debug("network event enrichment failed, using partial event",
-					zap.Error(err))
-				enrichedEvent = rawEnriched
-				a.MetricsRegistry.RecordEnrichmentError()
+				// ANCHOR: Discard host events - Filter: K8s-native compliance - Mar 24, 2026
+				// ErrNoKubernetesContext = PID has no pod association.
+				// Honour kubernetes_only config: discard (true) or fall through to partial (false).
+				if errors.Is(err, enrichment.ErrNoKubernetesContext) {
+					if a.Config.Agent.Enrichment.KubernetesOnly {
+						a.Logger.Debug("discarded host network event: no pod context")
+						a.MetricsRegistry.RecordHostEventDiscarded()
+						continue
+					}
+					// kubernetes_only=false: process host event with monitor's partial enrichment
+					a.Logger.Debug("processing host network event (kubernetes_only disabled)")
+					enrichedEvent = rawEnriched
+				} else {
+					a.Logger.Debug("network event enrichment failed, using partial event",
+						zap.Error(err))
+					enrichedEvent = rawEnriched
+					a.MetricsRegistry.RecordEnrichmentError()
+				}
 			}
 
 			violations := a.RuleEngine.Match(enrichedEvent)
@@ -517,10 +546,24 @@ func (a *Agent) handleDNSEvents(ctx context.Context) {
 			// HOW: EnrichDNSEvent uses container ID from /proc to look up pod in K8s API.
 			enrichedEvent, err := a.Enricher.EnrichDNSEvent(ctx, rawEnriched.RawEvent)
 			if err != nil {
-				a.Logger.Debug("DNS event enrichment failed, using partial event",
-					zap.Error(err))
-				enrichedEvent = rawEnriched
-				a.MetricsRegistry.RecordEnrichmentError()
+				// ANCHOR: Discard host events - Filter: K8s-native compliance - Mar 24, 2026
+				// ErrNoKubernetesContext = PID has no pod association.
+				// Honour kubernetes_only config: discard (true) or fall through to partial (false).
+				if errors.Is(err, enrichment.ErrNoKubernetesContext) {
+					if a.Config.Agent.Enrichment.KubernetesOnly {
+						a.Logger.Debug("discarded host DNS event: no pod context")
+						a.MetricsRegistry.RecordHostEventDiscarded()
+						continue
+					}
+					// kubernetes_only=false: process host event with monitor's partial enrichment
+					a.Logger.Debug("processing host DNS event (kubernetes_only disabled)")
+					enrichedEvent = rawEnriched
+				} else {
+					a.Logger.Debug("DNS event enrichment failed, using partial event",
+						zap.Error(err))
+					enrichedEvent = rawEnriched
+					a.MetricsRegistry.RecordEnrichmentError()
+				}
 			}
 
 			violations := a.RuleEngine.Match(enrichedEvent)
@@ -566,10 +609,24 @@ func (a *Agent) handleFileEvents(ctx context.Context) {
 			// HOW: EnrichFileEvent checks container security context for ReadOnlyFilesystem.
 			enrichedEvent, err := a.Enricher.EnrichFileEvent(ctx, rawEnriched.RawEvent)
 			if err != nil {
-				a.Logger.Debug("file event enrichment failed, using partial event",
-					zap.Error(err))
-				enrichedEvent = rawEnriched
-				a.MetricsRegistry.RecordEnrichmentError()
+				// ANCHOR: Discard host events - Filter: K8s-native compliance - Mar 24, 2026
+				// ErrNoKubernetesContext = PID has no pod association.
+				// Honour kubernetes_only config: discard (true) or fall through to partial (false).
+				if errors.Is(err, enrichment.ErrNoKubernetesContext) {
+					if a.Config.Agent.Enrichment.KubernetesOnly {
+						a.Logger.Debug("discarded host file event: no pod context")
+						a.MetricsRegistry.RecordHostEventDiscarded()
+						continue
+					}
+					// kubernetes_only=false: process host event with monitor's partial enrichment
+					a.Logger.Debug("processing host file event (kubernetes_only disabled)")
+					enrichedEvent = rawEnriched
+				} else {
+					a.Logger.Debug("file event enrichment failed, using partial event",
+						zap.Error(err))
+					enrichedEvent = rawEnriched
+					a.MetricsRegistry.RecordEnrichmentError()
+				}
 			}
 
 			violations := a.RuleEngine.Match(enrichedEvent)
@@ -615,10 +672,24 @@ func (a *Agent) handleCapabilityEvents(ctx context.Context) {
 			// HOW: EnrichCapabilityEvent maps raw capability ID to Linux capability name.
 			enrichedEvent, err := a.Enricher.EnrichCapabilityEvent(ctx, rawEnriched.RawEvent)
 			if err != nil {
-				a.Logger.Debug("capability event enrichment failed, using partial event",
-					zap.Error(err))
-				enrichedEvent = rawEnriched
-				a.MetricsRegistry.RecordEnrichmentError()
+				// ANCHOR: Discard host events - Filter: K8s-native compliance - Mar 24, 2026
+				// ErrNoKubernetesContext = PID has no pod association.
+				// Honour kubernetes_only config: discard (true) or fall through to partial (false).
+				if errors.Is(err, enrichment.ErrNoKubernetesContext) {
+					if a.Config.Agent.Enrichment.KubernetesOnly {
+						a.Logger.Debug("discarded host capability event: no pod context")
+						a.MetricsRegistry.RecordHostEventDiscarded()
+						continue
+					}
+					// kubernetes_only=false: process host event with monitor's partial enrichment
+					a.Logger.Debug("processing host capability event (kubernetes_only disabled)")
+					enrichedEvent = rawEnriched
+				} else {
+					a.Logger.Debug("capability event enrichment failed, using partial event",
+						zap.Error(err))
+					enrichedEvent = rawEnriched
+					a.MetricsRegistry.RecordEnrichmentError()
+				}
 			}
 
 			violations := a.RuleEngine.Match(enrichedEvent)

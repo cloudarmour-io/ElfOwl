@@ -103,6 +103,10 @@ type EnrichmentConfig struct {
 	KubernetesMetadata bool          `yaml:"kubernetes_metadata"`
 	MetadataCacheSize  int           `yaml:"metadata_cache_size"`
 	MetadataCacheTTL   time.Duration `yaml:"metadata_cache_ttl"`
+	// ANCHOR: kubernetes_only flag - Filter: host event discard - Mar 24, 2026
+	// When true (default), events from PIDs with no Kubernetes pod context are discarded.
+	// Set false to process host-process events alongside pod events.
+	KubernetesOnly bool `yaml:"kubernetes_only"`
 }
 
 // EvidenceConfig defines evidence processing settings
@@ -239,6 +243,13 @@ func (c *Config) applyEnvironmentOverrides() {
 			c.Agent.Kubernetes.InCluster = parsed
 		}
 	}
+
+	// ANCHOR: kubernetes_only env override - Filter: host event discard - Mar 24, 2026
+	if v := os.Getenv("OWL_KUBERNETES_ONLY"); v != "" {
+		if parsed, err := strconv.ParseBool(v); err == nil {
+			c.Agent.Enrichment.KubernetesOnly = parsed
+		}
+	}
 }
 
 // Validate validates the configuration
@@ -342,6 +353,7 @@ func DefaultConfig() *Config {
 				KubernetesMetadata: true,
 				MetadataCacheSize:  10000,
 				MetadataCacheTTL:   1 * time.Minute,
+				KubernetesOnly:     true, // default: K8s-native mode
 			},
 			Evidence: EvidenceConfig{
 				Signing: SigningConfig{

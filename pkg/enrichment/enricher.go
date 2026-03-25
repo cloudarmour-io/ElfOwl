@@ -555,6 +555,12 @@ func (e *Enricher) EnrichProcessEvent(
 		containerCtx.CPURequest = ""
 	}
 
+	// ANCHOR: K8s-native filter - Requirement: discard host events - Mar 24, 2026
+	// Return sentinel so the agent can decide (per kubernetes_only config) whether to discard.
+	if k8sCtx.PodUID == "" {
+		return nil, ErrNoKubernetesContext
+	}
+
 	return &EnrichedEvent{
 		RawEvent:   rawEvent,
 		EventType:  "process_execution",
@@ -655,6 +661,12 @@ func (e *Enricher) EnrichNetworkEvent(
 		k8sCtx.HasDefaultDenyNetworkPolicy = networkCtx.NamespaceIsolation
 	}
 
+	// ANCHOR: K8s-native filter - Requirement: discard host events - Mar 24, 2026
+	// Return sentinel so the agent can decide (per kubernetes_only config) whether to discard.
+	if k8sCtx.PodUID == "" {
+		return nil, ErrNoKubernetesContext
+	}
+
 	return &EnrichedEvent{
 		RawEvent:   rawEvent,
 		EventType:  "network_connection",
@@ -720,6 +732,12 @@ func (e *Enricher) EnrichDNSEvent(
 		QueryType:    queryTypeVal,
 		ResponseCode: respCodeVal,
 		QueryAllowed: queryAllowed,
+	}
+
+	// ANCHOR: K8s-native filter - Requirement: discard host events - Mar 24, 2026
+	// Return sentinel so the agent can decide (per kubernetes_only config) whether to discard.
+	if k8sCtx.PodUID == "" {
+		return nil, ErrNoKubernetesContext
 	}
 
 	return &EnrichedEvent{
@@ -789,6 +807,12 @@ func (e *Enricher) EnrichFileEvent(
 	containerCtx.MemoryRequest = ""         // No request by default
 	containerCtx.CPURequest = ""            // No request by default
 	containerCtx.AllowPrivilegeEscalation = true
+
+	// ANCHOR: K8s-native filter - Requirement: discard host events - Mar 24, 2026
+	// Return sentinel so the agent can decide (per kubernetes_only config) whether to discard.
+	if k8sCtx.PodUID == "" {
+		return nil, ErrNoKubernetesContext
+	}
 
 	return &EnrichedEvent{
 		RawEvent:   rawEvent,
@@ -867,6 +891,12 @@ func (e *Enricher) EnrichCapabilityEvent(
 	containerCtx.RunAsRoot = uidVal == 0
 	containerCtx.AllowPrivilegeEscalation = true // Default to true (least restrictive)
 	containerCtx.Privileged = false              // Default to false
+
+	// ANCHOR: K8s-native filter - Requirement: discard host events - Mar 24, 2026
+	// Return sentinel so the agent can decide (per kubernetes_only config) whether to discard.
+	if k8sCtx.PodUID == "" {
+		return nil, ErrNoKubernetesContext
+	}
 
 	return &EnrichedEvent{
 		RawEvent:   rawEvent,
