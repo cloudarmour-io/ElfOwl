@@ -414,9 +414,11 @@ func (a *Agent) handleProcessEvents(ctx context.Context) {
 						a.MetricsRegistry.RecordHostEventDiscarded()
 						continue
 					}
-					// kubernetes_only=false: process host event with monitor's partial enrichment
+					// kubernetes_only=false: process host event with non-K8s enrichment
 					a.Logger.Debug("processing host process event (kubernetes_only disabled)")
-					enrichedEvent = rawEnriched
+					if enrichedEvent == nil {
+						enrichedEvent = rawEnriched
+					}
 				} else {
 					a.Logger.Debug("process event enrichment failed, using partial event",
 						zap.Error(err))
@@ -490,9 +492,11 @@ func (a *Agent) handleNetworkEvents(ctx context.Context) {
 						a.MetricsRegistry.RecordHostEventDiscarded()
 						continue
 					}
-					// kubernetes_only=false: process host event with monitor's partial enrichment
+					// kubernetes_only=false: process host event with non-K8s enrichment
 					a.Logger.Debug("processing host network event (kubernetes_only disabled)")
-					enrichedEvent = rawEnriched
+					if enrichedEvent == nil {
+						enrichedEvent = rawEnriched
+					}
 				} else {
 					a.Logger.Debug("network event enrichment failed, using partial event",
 						zap.Error(err))
@@ -555,9 +559,11 @@ func (a *Agent) handleDNSEvents(ctx context.Context) {
 						a.MetricsRegistry.RecordHostEventDiscarded()
 						continue
 					}
-					// kubernetes_only=false: process host event with monitor's partial enrichment
+					// kubernetes_only=false: process host event with non-K8s enrichment
 					a.Logger.Debug("processing host DNS event (kubernetes_only disabled)")
-					enrichedEvent = rawEnriched
+					if enrichedEvent == nil {
+						enrichedEvent = rawEnriched
+					}
 				} else {
 					a.Logger.Debug("DNS event enrichment failed, using partial event",
 						zap.Error(err))
@@ -618,9 +624,11 @@ func (a *Agent) handleFileEvents(ctx context.Context) {
 						a.MetricsRegistry.RecordHostEventDiscarded()
 						continue
 					}
-					// kubernetes_only=false: process host event with monitor's partial enrichment
+					// kubernetes_only=false: process host event with non-K8s enrichment
 					a.Logger.Debug("processing host file event (kubernetes_only disabled)")
-					enrichedEvent = rawEnriched
+					if enrichedEvent == nil {
+						enrichedEvent = rawEnriched
+					}
 				} else {
 					a.Logger.Debug("file event enrichment failed, using partial event",
 						zap.Error(err))
@@ -681,9 +689,11 @@ func (a *Agent) handleCapabilityEvents(ctx context.Context) {
 						a.MetricsRegistry.RecordHostEventDiscarded()
 						continue
 					}
-					// kubernetes_only=false: process host event with monitor's partial enrichment
+					// kubernetes_only=false: process host event with non-K8s enrichment
 					a.Logger.Debug("processing host capability event (kubernetes_only disabled)")
-					enrichedEvent = rawEnriched
+					if enrichedEvent == nil {
+						enrichedEvent = rawEnriched
+					}
 				} else {
 					a.Logger.Debug("capability event enrichment failed, using partial event",
 						zap.Error(err))
