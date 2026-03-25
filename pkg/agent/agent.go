@@ -142,6 +142,15 @@ func NewAgent(config *Config) (*Agent, error) {
 	agent.K8sClient = k8sClient
 	agent.Logger.Info("kubernetes client initialized")
 
+	enricherK8sClient := agent.K8sClient
+	if !config.Agent.Enrichment.KubernetesMetadata {
+		agent.Logger.Warn("kubernetes metadata enrichment disabled", zap.Bool("kubernetes_only", config.Agent.Enrichment.KubernetesOnly))
+		if config.Agent.Enrichment.KubernetesOnly {
+			agent.Logger.Warn("kubernetes_only enabled while kubernetes_metadata is disabled; host events will be discarded")
+		}
+		enricherK8sClient = nil
+	}
+
 	// Initialize rule engine with configurable rule source
 	// ANCHOR: Rule engine initialization with file and ConfigMap support - Phase 3.2 Week 3
 	// Supports loading rules from YAML file, Kubernetes ConfigMap, or hardcoded defaults
@@ -172,7 +181,7 @@ func NewAgent(config *Config) (*Agent, error) {
 	}
 
 	// Initialize enricher
-	enricher, err := enrichment.NewEnricher(agent.K8sClient, config.Agent.ClusterID, config.Agent.NodeName)
+	enricher, err := enrichment.NewEnricher(enricherK8sClient, config.Agent.ClusterID, config.Agent.NodeName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create enricher: %w", err)
 	}
