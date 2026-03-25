@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/cilium/ebpf"
@@ -42,6 +43,10 @@ type Reader interface {
 type ProgramSet struct {
 	// Program is the loaded eBPF program (e.g., sched_process_exec tracepoint)
 	Program *ebpf.Program
+
+	// ANCHOR: Multi-program support - Feature: advanced tracepoints - Mar 25, 2026
+	// Track all programs loaded from the collection so multi-tracepoint modules close cleanly.
+	Programs map[string]*ebpf.Program
 
 	// Maps contains all maps used by this program (perf buffers, ring buffers, etc.)
 	Maps map[string]*ebpf.Map
@@ -211,44 +216,50 @@ func loadProgramSet(logger *zap.Logger, def programDefinition, opts LoadOptions)
 		return nil, fmt.Errorf("load collection: %w", err)
 	}
 
-	progName, prog := selectTracepointProgram(collection.Programs)
-	if prog == nil {
-		collection.Close()
-		return nil, fmt.Errorf("no tracepoint program found in %s", def.Name)
+	sectionByName := make(map[string]string, len(spec.Programs))
+	for name, progSpec := range spec.Programs {
+		if progSpec == nil {
+			continue
+		}
+		sectionByName[name] = progSpec.SectionName
 	}
 
-	tp, err := attachProgram(def, prog)
+	// ANCHOR: Multi-tracepoint attach - Feature: advanced probes - Mar 25, 2026
+	// Attach every tracepoint/raw_tracepoint section found in the collection.
+	links, programs, attachInfo, err := attachPrograms(collection.Programs, sectionByName)
 	if err != nil {
 		collection.Close()
-		return nil, fmt.Errorf("attach program to %s/%s: %w", def.TracepointGroup, def.TracepointName, err)
+		return nil, err
+	}
+	if len(programs) == 0 {
+		collection.Close()
+		return nil, fmt.Errorf("no tracepoint programs found in %s", def.Name)
 	}
 
 	mapName, eventMap := selectEventMap(collection.Maps, def.MapName)
 	if eventMap == nil {
-		tp.Close()
+		closeLinks(links)
 		collection.Close()
 		return nil, fmt.Errorf("event map %s not found", def.MapName)
 	}
 
 	reader, err := createReader(eventMap, def, opts, logger)
 	if err != nil {
-		tp.Close()
+		closeLinks(links)
 		collection.Close()
 		return nil, fmt.Errorf("create event reader: %w", err)
 	}
 
 	if logger != nil {
-		attachKind := "tracepoint"
-		if prog.Type() == ebpf.RawTracepoint {
-			attachKind = "raw_tracepoint"
+		for _, info := range attachInfo {
+			logger.Info("loaded eBPF program",
+				zap.String("program", def.Name),
+				zap.String("section", info.Section),
+				zap.String("map", mapName),
+				zap.String("attach_type", info.AttachKind),
+				zap.String("tracepoint", info.Tracepoint),
+			)
 		}
-		logger.Info("loaded eBPF program",
-			zap.String("program", def.Name),
-			zap.String("section", progName),
-			zap.String("map", mapName),
-			zap.String("attach_type", attachKind),
-			zap.String("tracepoint", fmt.Sprintf("%s/%s", def.TracepointGroup, def.TracepointName)),
-		)
 	}
 
 	allMaps := make(map[string]*ebpf.Map, len(collection.Maps))
@@ -258,13 +269,116 @@ func loadProgramSet(logger *zap.Logger, def programDefinition, opts LoadOptions)
 		}
 	}
 
+	var primary *ebpf.Program
+	for _, prog := range programs {
+		primary = prog
+		break
+	}
+
 	return &ProgramSet{
-		Program: prog,
-		Maps:    allMaps,
-		Reader:  reader,
-		Links:   []link.Link{tp},
-		Logger:  logger,
+		Program:  primary,
+		Programs: programs,
+		Maps:     allMaps,
+		Reader:   reader,
+		Links:    links,
+		Logger:   logger,
 	}, nil
+}
+
+
+// ANCHOR: Multi-tracepoint attach helpers - Feature: advanced probes - Mar 25, 2026
+// Parses program sections and attaches every tracepoint/raw_tracepoint program.
+type attachInfo struct {
+	ProgramName string
+	Section     string
+	AttachKind  string
+	Tracepoint  string
+}
+
+func attachPrograms(programs map[string]*ebpf.Program, sections map[string]string) ([]link.Link, map[string]*ebpf.Program, []attachInfo, error) {
+	links := make([]link.Link, 0)
+	attached := make(map[string]*ebpf.Program)
+	infos := make([]attachInfo, 0)
+
+	for name, prog := range programs {
+		if prog == nil {
+			continue
+		}
+		section := sections[name]
+		kind, group, tpName, ok := parseTracepointSection(section)
+		if !ok {
+			continue
+		}
+
+		var (
+			lnk link.Link
+			err error
+		)
+
+		switch kind {
+		case "tracepoint":
+			lnk, err = link.Tracepoint(group, tpName, prog, nil)
+		case "raw_tracepoint":
+			lnk, err = link.AttachRawTracepoint(link.RawTracepointOptions{
+				Name:    tpName,
+				Program: prog,
+			})
+		default:
+			continue
+		}
+
+		if err != nil {
+			closeLinks(links)
+			return nil, nil, nil, fmt.Errorf("attach program %s (%s): %w", name, section, err)
+		}
+
+		links = append(links, lnk)
+		attached[name] = prog
+		tracepoint := tpName
+		if kind == "tracepoint" {
+			tracepoint = fmt.Sprintf("%s/%s", group, tpName)
+		}
+		infos = append(infos, attachInfo{
+			ProgramName: name,
+			Section:     section,
+			AttachKind:  kind,
+			Tracepoint:  tracepoint,
+		})
+	}
+
+	return links, attached, infos, nil
+}
+
+func parseTracepointSection(section string) (kind, group, name string, ok bool) {
+	if strings.HasPrefix(section, "tracepoint/") {
+		parts := strings.Split(section, "/")
+		if len(parts) < 3 {
+			return "", "", "", false
+		}
+		group = parts[1]
+		name = strings.Join(parts[2:], "/")
+		if group == "" || name == "" {
+			return "", "", "", false
+		}
+		return "tracepoint", group, name, true
+	}
+	if strings.HasPrefix(section, "raw_tracepoint/") {
+		name = strings.TrimPrefix(section, "raw_tracepoint/")
+		if name == "" {
+			return "", "", "", false
+		}
+		return "raw_tracepoint", "", name, true
+	}
+	return "", "", "", false
+}
+
+func closeLinks(links []link.Link) {
+	for _, lnk := range links {
+		if lnk == nil {
+			continue
+		}
+		_ = lnk.Close()
+	}
 }
 
 // ANCHOR: Tracepoint program selection - Utility: pick tracepoint program - Mar 23, 2026
@@ -528,10 +642,25 @@ func (ps *ProgramSet) Close() error {
 		}
 	}
 
-	// Close program
+	// Close programs (de-duplicate in case Program also appears in Programs)
+	closedPrograms := make(map[*ebpf.Program]struct{}, len(ps.Programs))
+	for name, prog := range ps.Programs {
+		if prog == nil {
+			continue
+		}
+		if _, seen := closedPrograms[prog]; seen {
+			continue
+		}
+		closedPrograms[prog] = struct{}{}
+		if err := prog.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("close program %s: %w", name, err))
+		}
+	}
 	if ps.Program != nil {
-		if err := ps.Program.Close(); err != nil {
-			errs = append(errs, fmt.Errorf("close program: %w", err))
+		if _, seen := closedPrograms[ps.Program]; !seen {
+			if err := ps.Program.Close(); err != nil {
+				errs = append(errs, fmt.Errorf("close program: %w", err))
+			}
 		}
 	}
 
