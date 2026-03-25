@@ -21,6 +21,7 @@ Linux-only testing helpers using Multipass.
 - `start-vm.sh`: start VM and confirm source availability.
 - `vm-exec.sh`: execute arbitrary command in VM (defaults to project dir).
 - `build-ebpf-vm.sh`: compile all `pkg/ebpf/programs/*.c` inside VM and validate ELF artifacts (`--pull` copies them back locally).
+- `generate-vmlinux.sh`: generate `pkg/ebpf/programs/vmlinux.h` from kernel BTF (CO-RE builds).
 - `test-ebpf-kernel.sh`: run VM unit tests + root kernel integration tests for process/network/file/capability/DNS event capture, with pass/fail matrix.
 - `test-events.sh`: run event-path tests (`pkg/ebpf`, `pkg/rules` integration, and Kubernetes compliance event builders in `pkg/agent`) and print a pass/fail matrix (`--kernel` also runs root kernel eBPF integration checks).
 - `start-agent.sh`: build/start agent in VM and fail fast with logs if startup fails.
