@@ -430,11 +430,19 @@ func (a *Agent) handleProcessEvents(ctx context.Context) {
 						enrichedEvent = rawEnriched
 					}
 				} else {
+					// ANCHOR: Fail-closed on K8s lookup errors - Fix PR-23 HIGH #2 - Mar 25, 2026
+					// During K8s API outage/throttling/RBAC failure, pod lookup errors must not
+					// bypass kubernetes_only filtering — discard to prevent false positives.
+					a.MetricsRegistry.RecordEnrichmentError()
+					if a.Config.Agent.Enrichment.KubernetesOnly {
+						a.Logger.Debug("discarded process event: K8s lookup failed and kubernetes_only=true", zap.Error(err))
+						a.MetricsRegistry.RecordHostEventDiscarded()
+						continue
+					}
 					a.Logger.Debug("process event enrichment failed, using partial event",
 						zap.Error(err))
 					// Fall back to partially-enriched event from monitor
 					enrichedEvent = rawEnriched
-					a.MetricsRegistry.RecordEnrichmentError()
 				}
 			}
 
@@ -508,10 +516,18 @@ func (a *Agent) handleNetworkEvents(ctx context.Context) {
 						enrichedEvent = rawEnriched
 					}
 				} else {
+					// ANCHOR: Fail-closed on K8s lookup errors - Fix PR-23 HIGH #2 - Mar 25, 2026
+					// During K8s API outage/throttling/RBAC failure, pod lookup errors must not
+					// bypass kubernetes_only filtering — discard to prevent false positives.
+					a.MetricsRegistry.RecordEnrichmentError()
+					if a.Config.Agent.Enrichment.KubernetesOnly {
+						a.Logger.Debug("discarded network event: K8s lookup failed and kubernetes_only=true", zap.Error(err))
+						a.MetricsRegistry.RecordHostEventDiscarded()
+						continue
+					}
 					a.Logger.Debug("network event enrichment failed, using partial event",
 						zap.Error(err))
 					enrichedEvent = rawEnriched
-					a.MetricsRegistry.RecordEnrichmentError()
 				}
 			}
 
@@ -575,10 +591,18 @@ func (a *Agent) handleDNSEvents(ctx context.Context) {
 						enrichedEvent = rawEnriched
 					}
 				} else {
+					// ANCHOR: Fail-closed on K8s lookup errors - Fix PR-23 HIGH #2 - Mar 25, 2026
+					// During K8s API outage/throttling/RBAC failure, pod lookup errors must not
+					// bypass kubernetes_only filtering — discard to prevent false positives.
+					a.MetricsRegistry.RecordEnrichmentError()
+					if a.Config.Agent.Enrichment.KubernetesOnly {
+						a.Logger.Debug("discarded DNS event: K8s lookup failed and kubernetes_only=true", zap.Error(err))
+						a.MetricsRegistry.RecordHostEventDiscarded()
+						continue
+					}
 					a.Logger.Debug("DNS event enrichment failed, using partial event",
 						zap.Error(err))
 					enrichedEvent = rawEnriched
-					a.MetricsRegistry.RecordEnrichmentError()
 				}
 			}
 
@@ -640,10 +664,18 @@ func (a *Agent) handleFileEvents(ctx context.Context) {
 						enrichedEvent = rawEnriched
 					}
 				} else {
+					// ANCHOR: Fail-closed on K8s lookup errors - Fix PR-23 HIGH #2 - Mar 25, 2026
+					// During K8s API outage/throttling/RBAC failure, pod lookup errors must not
+					// bypass kubernetes_only filtering — discard to prevent false positives.
+					a.MetricsRegistry.RecordEnrichmentError()
+					if a.Config.Agent.Enrichment.KubernetesOnly {
+						a.Logger.Debug("discarded file event: K8s lookup failed and kubernetes_only=true", zap.Error(err))
+						a.MetricsRegistry.RecordHostEventDiscarded()
+						continue
+					}
 					a.Logger.Debug("file event enrichment failed, using partial event",
 						zap.Error(err))
 					enrichedEvent = rawEnriched
-					a.MetricsRegistry.RecordEnrichmentError()
 				}
 			}
 
@@ -705,10 +737,18 @@ func (a *Agent) handleCapabilityEvents(ctx context.Context) {
 						enrichedEvent = rawEnriched
 					}
 				} else {
+					// ANCHOR: Fail-closed on K8s lookup errors - Fix PR-23 HIGH #2 - Mar 25, 2026
+					// During K8s API outage/throttling/RBAC failure, pod lookup errors must not
+					// bypass kubernetes_only filtering — discard to prevent false positives.
+					a.MetricsRegistry.RecordEnrichmentError()
+					if a.Config.Agent.Enrichment.KubernetesOnly {
+						a.Logger.Debug("discarded capability event: K8s lookup failed and kubernetes_only=true", zap.Error(err))
+						a.MetricsRegistry.RecordHostEventDiscarded()
+						continue
+					}
 					a.Logger.Debug("capability event enrichment failed, using partial event",
 						zap.Error(err))
 					enrichedEvent = rawEnriched
-					a.MetricsRegistry.RecordEnrichmentError()
 				}
 			}
 
