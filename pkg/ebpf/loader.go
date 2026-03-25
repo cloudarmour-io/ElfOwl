@@ -146,16 +146,16 @@ func programDefinitions(opts LoadOptions) []programDefinition {
 			Name:            ProcessProgramName,
 			Description:     "process execution",
 			MapName:         ProcessEventsMap,
-			TracepointGroup: "syscalls",
-			TracepointName:  "sys_enter_execve",
+			TracepointGroup: "raw_syscalls",
+			TracepointName:  "sys_enter",
 			Config:          opts.Process,
 		},
 		{
 			Name:            NetworkProgramName,
 			Description:     "network connections",
 			MapName:         NetworkEventsMap,
-			TracepointGroup: "syscalls",
-			TracepointName:  "sys_enter_connect",
+			TracepointGroup: "tcp",
+			TracepointName:  "tcp_connect",
 			Config:          opts.Network,
 		},
 		{
@@ -170,8 +170,8 @@ func programDefinitions(opts LoadOptions) []programDefinition {
 			Name:            CapabilityProgramName,
 			Description:     "linux capabilities",
 			MapName:         CapabilityEventsMap,
-			TracepointGroup: "syscalls",
-			TracepointName:  "sys_enter_mount",
+			TracepointGroup: "capability",
+			TracepointName:  "cap_capable",
 			Config:          opts.Capability,
 		},
 		{
@@ -251,9 +251,16 @@ func loadProgramSet(logger *zap.Logger, def programDefinition, opts LoadOptions)
 		)
 	}
 
+	allMaps := make(map[string]*ebpf.Map, len(collection.Maps))
+	for name, m := range collection.Maps {
+		if m != nil {
+			allMaps[name] = m
+		}
+	}
+
 	return &ProgramSet{
 		Program: prog,
-		Maps:    map[string]*ebpf.Map{mapName: eventMap},
+		Maps:    allMaps,
 		Reader:  reader,
 		Links:   []link.Link{tp},
 		Logger:  logger,
@@ -504,12 +511,20 @@ func (ps *ProgramSet) Close() error {
 		}
 	}
 
-	// Close all maps
+	// ANCHOR: Close all loaded maps once - Fix: helper-map fd lifecycle - Mar 25, 2026
+	// ProgramSet now tracks all maps from the collection; de-duplicate by pointer
+	// in case multiple map names alias the same map object.
+	closedMaps := make(map[*ebpf.Map]struct{}, len(ps.Maps))
 	for name, m := range ps.Maps {
-		if m != nil {
-			if err := m.Close(); err != nil {
-				errs = append(errs, fmt.Errorf("close map %s: %w", name, err))
-			}
+		if m == nil {
+			continue
+		}
+		if _, seen := closedMaps[m]; seen {
+			continue
+		}
+		closedMaps[m] = struct{}{}
+		if err := m.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("close map %s: %w", name, err))
 		}
 	}
 

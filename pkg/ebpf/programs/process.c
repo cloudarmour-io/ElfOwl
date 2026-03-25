@@ -1,20 +1,10 @@
-// ANCHOR: Process Monitor eBPF Program - Mar 23, 2026
-// Captures process execution events via sys_enter_execve.
+// ANCHOR: Process Monitor eBPF Program - Mar 25, 2026
+// Restores execve + execveat coverage using raw_syscalls/sys_enter.
 
-#include <linux/bpf.h>
-#include <linux/types.h>
-#include <bpf/bpf_helpers.h>
+#include "common.h"
 
-struct sys_enter_execve_ctx {
-	__u16 common_type;
-	__u8 common_flags;
-	__u8 common_preempt_count;
-	__s32 common_pid;
-	long __syscall_nr;
-	const char *filename;
-	const char *const *argv;
-	const char *const *envp;
-};
+#define MAX_ARGC 3
+#define MAX_ARG_LEN 64
 
 // Event layout must match pkg/ebpf/types.go: ProcessEvent.
 struct process_event {
@@ -38,29 +28,59 @@ struct {
 	__type(value, struct process_event);
 } process_heap SEC(".maps");
 
-static __always_inline void read_arg0(char *dst, __u32 dst_len, const char *const *argv)
+// ANCHOR: Exec argv parsing helper - Fix: recover execveat visibility - Mar 25, 2026
+// Best-effort argv reconstruction with bounded loops for verifier safety.
+static __always_inline void fill_exec_event(struct process_event *evt, const char *filename, const char *const *argv)
 {
-	const char *arg0 = NULL;
+	int offset = 0;
 
-	if (!argv) {
-		return;
+	if (filename) {
+		bpf_probe_read_user_str(evt->filename, sizeof(evt->filename), filename);
 	}
 
-	bpf_probe_read_user(&arg0, sizeof(arg0), argv);
-	if (!arg0) {
-		return;
-	}
+#pragma unroll
+	for (int i = 0; i < MAX_ARGC; i++) {
+		const char *argp = 0;
+		if (!argv || bpf_probe_read_user(&argp, sizeof(argp), &argv[i]) < 0) {
+			break;
+		}
+		if (!argp) {
+			break;
+		}
 
-	bpf_probe_read_user_str(dst, dst_len, arg0);
+		if (offset > 0 && offset < (int)sizeof(evt->argv) - 1) {
+			evt->argv[offset++] = ' ';
+		}
+
+#pragma unroll
+		for (int j = 0; j < MAX_ARG_LEN - 1; j++) {
+			char c = 0;
+			if (offset >= (int)sizeof(evt->argv) - 1) {
+				break;
+			}
+			if (bpf_probe_read_user(&c, sizeof(c), argp + j) < 0) {
+				break;
+			}
+			if (c == '\0') {
+				break;
+			}
+			evt->argv[offset++] = c;
+		}
+	}
 }
 
-SEC("tracepoint/syscalls/sys_enter_execve")
-int process_monitor(struct sys_enter_execve_ctx *ctx)
+SEC("tracepoint/raw_syscalls/sys_enter")
+int process_monitor(struct trace_event_raw_sys_enter *ctx)
 {
 	struct process_event *evt;
+	const char *filename = 0;
+	const char *const *argv = 0;
 	__u32 key = 0;
-	__u64 pid_tgid;
-	__u64 uid_gid;
+	long id = ctx->id;
+
+	if (id != __NR_execve && id != __NR_execveat) {
+		return 0;
+	}
 
 	evt = bpf_map_lookup_elem(&process_heap, &key);
 	if (!evt) {
@@ -68,27 +88,29 @@ int process_monitor(struct sys_enter_execve_ctx *ctx)
 	}
 	__builtin_memset(evt, 0, sizeof(*evt));
 
-	pid_tgid = bpf_get_current_pid_tgid();
-	uid_gid = bpf_get_current_uid_gid();
-
-	evt->pid = pid_tgid >> 32;
-	evt->uid = (__u32)uid_gid;
-	evt->gid = uid_gid >> 32;
-	evt->cgroup_id = bpf_get_current_cgroup_id();
-	evt->capabilities = 0;
-
-	if (ctx->filename) {
-		bpf_probe_read_user_str(evt->filename, sizeof(evt->filename), ctx->filename);
+	if (id == __NR_execve) {
+		filename = (const char *)ctx->args[0];
+		argv = (const char *const *)ctx->args[1];
 	} else {
-		bpf_get_current_comm(evt->filename, sizeof(evt->filename));
+		filename = (const char *)ctx->args[1];
+		argv = (const char *const *)ctx->args[2];
 	}
 
-	read_arg0(evt->argv, sizeof(evt->argv), ctx->argv);
+	evt->pid = current_pid();
+	evt->uid = current_uid();
+	evt->gid = current_gid();
+	evt->capabilities = current_cap_effective();
+	evt->cgroup_id = bpf_get_current_cgroup_id();
+
+	fill_exec_event(evt, filename, argv);
+	if (evt->filename[0] == '\0') {
+		bpf_get_current_comm(evt->filename, sizeof(evt->filename));
+	}
 	if (evt->argv[0] == '\0') {
 		bpf_get_current_comm(evt->argv, sizeof(evt->argv));
 	}
 
-	bpf_perf_event_output(ctx, &process_events, BPF_F_CURRENT_CPU, evt, sizeof(*evt));
+	SUBMIT_EVENT(ctx, process_events, evt);
 	return 0;
 }
 

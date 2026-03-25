@@ -1,25 +1,21 @@
-// ANCHOR: Capability Monitor eBPF Program - Mar 23, 2026
-// Captures high-risk capability path via sys_enter_mount (CAP_SYS_ADMIN).
+// ANCHOR: Capability Monitor eBPF Program - Mar 25, 2026
+// Restores real capability-check telemetry via tracepoint/capability/cap_capable.
 
-#include <linux/bpf.h>
-#include <linux/types.h>
-#include <bpf/bpf_helpers.h>
-
-struct sys_enter_mount_ctx {
-	__u16 common_type;
-	__u8 common_flags;
-	__u8 common_preempt_count;
-	__s32 common_pid;
-	long __syscall_nr;
-	const char *dev_name;
-	const char *dir_name;
-	const char *type;
-	unsigned long flags;
-	const void *data;
-};
+#include "common.h"
 
 // Capability constants (include/uapi/linux/capability.h).
 #define CAP_SYS_ADMIN 21
+#define CAP_SYS_MODULE 16
+#define CAP_SYS_BOOT 22
+#define CAP_SYS_PTRACE 19
+
+// This tracepoint format includes cap and cap_opt integer fields.
+struct trace_event_raw_cap_capable {
+	struct trace_entry ent;
+	int cap;
+	int cap_opt;
+	char __data[0];
+};
 
 // Event layout must match pkg/ebpf/types.go: CapabilityEvent.
 struct capability_event {
@@ -34,18 +30,28 @@ struct {
 	__uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
 } capability_events SEC(".maps");
 
-SEC("tracepoint/syscalls/sys_enter_mount")
-int capability_monitor(struct sys_enter_mount_ctx *ctx)
+SEC("tracepoint/capability/cap_capable")
+int capability_monitor(struct trace_event_raw_cap_capable *ctx)
 {
 	struct capability_event evt = {};
+	__u32 cap = (__u32)ctx->cap;
 
-	evt.pid = bpf_get_current_pid_tgid() >> 32;
-	evt.capability = CAP_SYS_ADMIN;
+	if (cap != CAP_SYS_ADMIN &&
+	    cap != CAP_SYS_MODULE &&
+	    cap != CAP_SYS_BOOT &&
+	    cap != CAP_SYS_PTRACE) {
+		return 0;
+	}
+
+	evt.pid = current_pid();
+	evt.capability = cap;
 	evt.check_type = 1;
 	evt.cgroup_id = bpf_get_current_cgroup_id();
-	__builtin_memcpy(evt.syscall_name, "mount", 6);
+	// Best effort: retain process comm in syscall_name until explicit syscall
+	// attribution is plumbed for this event shape.
+	bpf_get_current_comm(evt.syscall_name, sizeof(evt.syscall_name));
 
-	bpf_perf_event_output(ctx, &capability_events, BPF_F_CURRENT_CPU, &evt, sizeof(evt));
+	SUBMIT_EVENT(ctx, capability_events, &evt);
 	return 0;
 }
 
