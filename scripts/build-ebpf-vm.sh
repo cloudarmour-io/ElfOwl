@@ -40,10 +40,11 @@ fi
 multipass start "$VM_NAME" >/dev/null 2>&1 || true
 
 echo "[ebpf-build] Ensuring VM build dependencies..."
+# ANCHOR: VM CO-RE deps - Feature: bpftool install - Mar 25, 2026
 multipass exec "$VM_NAME" -- bash -lc '
   set -euo pipefail
   sudo apt-get update -y >/dev/null
-  sudo apt-get install -y clang llvm make libbpf-dev linux-libc-dev >/dev/null
+  sudo apt-get install -y clang llvm make libbpf-dev linux-libc-dev bpftool >/dev/null
 '
 
 echo "[ebpf-build] Building C eBPF programs in VM..."
