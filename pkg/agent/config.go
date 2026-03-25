@@ -47,14 +47,15 @@ type LoggingConfig struct {
 // Defines Cilium/eBPF monitor settings (now the only monitor implementation)
 // Fully replaces goBPF with production-grade cilium/ebpf library
 type EBPFConfig struct {
-	Enabled    bool              `yaml:"enabled"`
-	Process    EBPFMonitorConfig `yaml:"process"`
-	Network    EBPFMonitorConfig `yaml:"network"`
-	DNS        EBPFMonitorConfig `yaml:"dns"`
-	File       EBPFMonitorConfig `yaml:"file"`
-	Capability EBPFMonitorConfig `yaml:"capability"`
-	PerfBuffer PerfBufferConfig  `yaml:"perf_buffer"`
-	RingBuffer RingBufferConfig  `yaml:"ring_buffer"`
+	Enabled       bool              `yaml:"enabled"`
+	KernelBTFPath string            `yaml:"kernel_btf_path"`
+	Process       EBPFMonitorConfig `yaml:"process"`
+	Network       EBPFMonitorConfig `yaml:"network"`
+	DNS           EBPFMonitorConfig `yaml:"dns"`
+	File          EBPFMonitorConfig `yaml:"file"`
+	Capability    EBPFMonitorConfig `yaml:"capability"`
+	PerfBuffer    PerfBufferConfig  `yaml:"perf_buffer"`
+	RingBuffer    RingBufferConfig  `yaml:"ring_buffer"`
 }
 
 // EBPFMonitorConfig defines individual Cilium/eBPF monitor settings
@@ -282,6 +283,7 @@ func DefaultConfig() *Config {
 			// Now enabled by default with all monitors active (goBPF has been completely removed)
 			EBPF: EBPFConfig{
 				Enabled: true,
+				KernelBTFPath: "",
 				Process: EBPFMonitorConfig{
 					Enabled:    true,
 					BufferSize: 8192,

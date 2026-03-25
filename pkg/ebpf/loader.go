@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/cilium/ebpf/btf"
+
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/perf"
@@ -85,13 +87,14 @@ type RingBufferOptions struct {
 
 // LoadOptions defines which programs to load and how to configure readers.
 type LoadOptions struct {
-	Process    ProgramConfig
-	Network    ProgramConfig
-	File       ProgramConfig
-	Capability ProgramConfig
-	DNS        ProgramConfig
-	PerfBuffer PerfBufferOptions
-	RingBuffer RingBufferOptions
+	Process       ProgramConfig
+	Network       ProgramConfig
+	File          ProgramConfig
+	Capability    ProgramConfig
+	DNS           ProgramConfig
+	PerfBuffer    PerfBufferOptions
+	RingBuffer    RingBufferOptions
+	KernelBTFPath string
 }
 
 // ============================================================================
@@ -212,7 +215,22 @@ func loadProgramSet(logger *zap.Logger, def programDefinition, opts LoadOptions)
 		return nil, fmt.Errorf("parse bytecode: %w", err)
 	}
 
-	collection, err := ebpf.NewCollection(spec)
+	// ANCHOR: Kernel BTF override - Feature: CO-RE portability - Mar 25, 2026
+	// Allows loading CO-RE programs against an explicit kernel BTF path.
+	var kernelTypes *btf.Spec
+	if opts.KernelBTFPath != "" {
+		btfSpec, err := btf.LoadSpec(opts.KernelBTFPath)
+		if err != nil {
+			return nil, fmt.Errorf("load kernel BTF spec: %w", err)
+		}
+		kernelTypes = btfSpec
+	}
+
+	collection, err := ebpf.NewCollectionWithOptions(spec, ebpf.CollectionOptions{
+		Programs: ebpf.ProgramOptions{
+			KernelTypes: kernelTypes,
+		},
+	})
 	if err != nil {
 		return nil, fmt.Errorf("load collection: %w", err)
 	}
