@@ -46,24 +46,35 @@ type ProcessEvent struct {
 // Network Event Structure (matches eBPF struct network_event)
 // ============================================================================
 
+// ANCHOR: NetworkEvent extended layout - Feature: IPv6 + state metadata - Mar 25, 2026
+// Matches the packed network_event layout in the eBPF program.
 type NetworkEvent struct {
-	PID      uint32
-	Family   uint16 // AF_INET=2 or AF_INET6=10
-	SPort    uint16 // Host byte order
-	DPort    uint16 // Host byte order
-	SAddr    uint32 // IPv4 or first 4 bytes of IPv6
-	DAddr    uint32 // IPv4 or first 4 bytes of IPv6
-	Protocol uint8  // IPPROTO_TCP=6 or IPPROTO_UDP=17
-	CgroupID uint64
+	PID       uint32
+	Family    uint16 // AF_INET=2 or AF_INET6=10
+	SPort     uint16 // Host byte order
+	DPort     uint16 // Host byte order
+	SAddr     uint32 // IPv4 only
+	DAddr     uint32 // IPv4 only
+	SAddrV6   [16]byte
+	DAddrV6   [16]byte
+	Protocol  uint8  // IPPROTO_TCP=6 or IPPROTO_UDP=17
+	Direction uint8
+	State     uint8
+	NetNS     uint32
+	CgroupID  uint64
 }
 
 // ============================================================================
 // File Event Structure (matches eBPF struct file_event)
 // ============================================================================
 
+// ANCHOR: FileEvent mode + fd fields - Feature: expanded file syscall coverage - Mar 25, 2026
+// Matches the packed file_event layout in the eBPF program.
 type FileEvent struct {
 	PID       uint32
-	Flags     uint32 // Open flags (O_WRONLY, O_RDWR, etc.)
+	Flags     uint32 // Open or operation flags
+	Mode      uint32 // chmod/openat mode
+	FD        uint32 // write/pwrite fd or *at dir fd
 	Operation uint8  // write=1, read=2, chmod=3, unlink=4
 	CgroupID  uint64
 	Filename  [256]byte
@@ -74,10 +85,13 @@ type FileEvent struct {
 // Capability Event Structure (matches eBPF struct capability_event)
 // ============================================================================
 
+// ANCHOR: CapabilityEvent syscall id - Feature: syscall attribution - Mar 25, 2026
+// Matches the packed capability_event layout in the eBPF program.
 type CapabilityEvent struct {
 	PID         uint32
 	Capability  uint32 // CAP_SYS_ADMIN=21, CAP_SYS_MODULE=16, etc.
 	CheckType   uint8  // check=1, use=2
+	SyscallID   uint32
 	CgroupID    uint64
 	SyscallName [32]byte
 }
@@ -86,11 +100,14 @@ type CapabilityEvent struct {
 // DNS Event Structure (matches eBPF struct dns_event)
 // ============================================================================
 
+// ANCHOR: DNSEvent server family - Feature: IPv6 DNS visibility - Mar 25, 2026
+// Matches the packed dns_event layout in the eBPF program.
 type DNSEvent struct {
 	PID          uint32
 	QueryType    uint16 // A=1, AAAA=28, MX=15, TXT=16, etc.
 	ResponseCode uint8  // 0=NOERROR, 1=FORMERR, 2=SERVFAIL, etc.
 	QueryAllowed uint8  // 1=allowed, 0=suspicious/blocked
+	ServerFamily uint16 // AF_INET=2 or AF_INET6=10
 	CgroupID     uint64
 	QueryName    [256]byte // Domain name
 	Server       [16]byte  // DNS server IP
