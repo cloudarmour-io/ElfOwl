@@ -140,6 +140,11 @@ func TestProcessProgramEmitsEvents(t *testing.T) {
 		filename := trimNull(evt.Filename[:])
 		argv := trimNull(evt.Argv[:])
 		if strings.Contains(filename, "echo") || strings.Contains(argv, "echo") {
+			// ANCHOR: CO-RE field assertions - Test: cap/netns validation - Mar 25, 2026
+			// Ensure CO-RE capability reads populate non-zero values.
+			if evt.Capabilities == 0 {
+				t.Fatal("capabilities not populated (CO-RE required)")
+			}
 			return
 		}
 	}
@@ -194,6 +199,11 @@ func TestNetworkProgramEmitsEvents(t *testing.T) {
 			continue
 		}
 		if evt.Protocol == IPPROTO_TCP && int(evt.DPort) == port && evt.DAddr == ipStringToUint32("127.0.0.1") {
+			// ANCHOR: CO-RE field assertions - Test: cap/netns validation - Mar 25, 2026
+			// Ensure CO-RE netns reads populate non-zero values.
+			if evt.NetNS == 0 {
+				t.Fatalf("netns not populated (CO-RE required)")
+			}
 			return
 		}
 	}
