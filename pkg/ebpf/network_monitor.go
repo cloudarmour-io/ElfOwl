@@ -115,12 +115,16 @@ func (nm *NetworkMonitor) eventLoop(ctx context.Context) {
 				protocol = "udp"
 			}
 
+			sourceIP, destinationIP := networkIPs(evt)
 			netCtx := &enrichment.NetworkContext{
-				SourceIP:        net.IPv4(byte(evt.SAddr), byte(evt.SAddr>>8), byte(evt.SAddr>>16), byte(evt.SAddr>>24)).String(),
-				DestinationIP:   net.IPv4(byte(evt.DAddr), byte(evt.DAddr>>8), byte(evt.DAddr>>16), byte(evt.DAddr>>24)).String(),
-				SourcePort:      evt.SPort,
-				DestinationPort: evt.DPort,
-				Protocol:        protocol,
+				SourceIP:           sourceIP,
+				DestinationIP:      destinationIP,
+				SourcePort:         evt.SPort,
+				DestinationPort:    evt.DPort,
+				Protocol:           protocol,
+				Direction:          networkDirection(evt.Direction),
+				ConnectionState:    tcpStateName(evt.State),
+				NetworkNamespaceID: evt.NetNS,
 			}
 
 			enriched := &enrichment.EnrichedEvent{
@@ -150,6 +154,59 @@ func (nm *NetworkMonitor) eventLoop(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// ANCHOR: Network direction/state mapping - Feature: advanced telemetry - Mar 25, 2026
+// Converts kernel numeric enums to human-readable strings for enrichment.
+func networkDirection(direction uint8) string {
+	switch direction {
+	case 1:
+		return "outbound"
+	case 2:
+		return "inbound"
+	default:
+		return "unknown"
+	}
+}
+
+func tcpStateName(state uint8) string {
+	switch state {
+	case 1:
+		return "ESTABLISHED"
+	case 2:
+		return "SYN_SENT"
+	case 3:
+		return "SYN_RECV"
+	case 4:
+		return "FIN_WAIT1"
+	case 5:
+		return "FIN_WAIT2"
+	case 6:
+		return "TIME_WAIT"
+	case 7:
+		return "CLOSE"
+	case 8:
+		return "CLOSE_WAIT"
+	case 9:
+		return "LAST_ACK"
+	case 10:
+		return "LISTEN"
+	case 11:
+		return "CLOSING"
+	case 12:
+		return "NEW_SYN_RECV"
+	default:
+		return "UNKNOWN"
+	}
+}
+
+func networkIPs(evt *NetworkEvent) (string, string) {
+	if evt.Family == AF_INET6 {
+		return net.IP(evt.SAddrV6[:]).String(), net.IP(evt.DAddrV6[:]).String()
+	}
+	source := net.IPv4(byte(evt.SAddr), byte(evt.SAddr>>8), byte(evt.SAddr>>16), byte(evt.SAddr>>24)).String()
+	destination := net.IPv4(byte(evt.DAddr), byte(evt.DAddr>>8), byte(evt.DAddr>>16), byte(evt.DAddr>>24)).String()
+	return source, destination
 }
 
 // EventChan returns the channel for receiving events
