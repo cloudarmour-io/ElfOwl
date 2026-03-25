@@ -6,7 +6,9 @@ package enrichment
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"net"
 	"os"
 	"path/filepath"
@@ -14,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"go.uber.org/zap"
@@ -32,7 +35,20 @@ type Enricher struct {
 	// Caches containerID -> namespace/podname mappings to avoid repeated K8s API queries
 	containerToPodMutex sync.RWMutex
 	containerToPodCache map[string]string // containerID -> "namespace/podname"
+
+	// ANCHOR: cgroupID to containerID cache - Fix PR-23 #3 /proc race - Mar 25, 2026
+	// CgroupID is captured in kernel at event time (race-free). Used as fallback when
+	// /proc/<pid>/cgroup is unreadable (process already exited).
+	cgroupToContainerMutex sync.RWMutex
+	cgroupToContainerCache map[uint64]string // cgroupID -> containerID
+
+	// ANCHOR: cgroup refresh guard - Fix PR-23 #3 residual first-event drop - Mar 25, 2026
+	// Throttles expensive cgroup<->pod refresh scans on repeated cold-cache misses.
+	cgroupRefreshMutex sync.Mutex
+	lastCgroupRefresh  time.Time
 }
+
+const cgroupMappingRefreshInterval = 30 * time.Second
 
 // NewEnricher creates a new event enricher
 // ANCHOR: Enricher initialization without circular dependency - Dec 26, 2025
@@ -40,13 +56,23 @@ type Enricher struct {
 func NewEnricher(k8sClient *kubernetes.Client, clusterID, nodeName string) (*Enricher, error) {
 	logger, _ := zap.NewProduction()
 
-	return &Enricher{
-		K8sClient:           k8sClient,
-		ClusterID:           clusterID,
-		NodeName:            nodeName,
-		Logger:              logger,
-		containerToPodCache: make(map[string]string),
-	}, nil
+	enricher := &Enricher{
+		K8sClient:              k8sClient,
+		ClusterID:              clusterID,
+		NodeName:               nodeName,
+		Logger:                 logger,
+		containerToPodCache:    make(map[string]string),
+		cgroupToContainerCache: make(map[uint64]string),
+	}
+
+	// Warm up cgroup mappings once on startup to reduce first-event drops when /proc races.
+	if enricher.K8sClient != nil {
+		warmCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		enricher.refreshCgroupPodMappings(warmCtx, true)
+	}
+
+	return enricher, nil
 }
 
 // ANCHOR: Reflection helpers for eBPF events - Phase 3 debugging support - Jan 2026
@@ -274,6 +300,52 @@ func procParentPID(pid uint32) uint32 {
 	return uint32(ppid)
 }
 
+func normalizeContainerIDSegment(seg string) string {
+	if seg == "" {
+		return ""
+	}
+	seg = strings.TrimSuffix(seg, ".scope")
+	seg = strings.TrimPrefix(seg, "docker-")
+	seg = strings.TrimPrefix(seg, "containerd-")
+	seg = strings.TrimPrefix(seg, "cri-containerd-")
+	seg = strings.TrimPrefix(seg, "crio-")
+	seg = strings.TrimPrefix(seg, "cri-o-")
+	seg = strings.TrimPrefix(seg, "libpod-")
+
+	seg = strings.ToLower(seg)
+	if len(seg) >= 32 && isHexString(seg) {
+		return seg
+	}
+	return ""
+}
+
+func containerIDFromPath(path string) string {
+	segments := strings.Split(path, "/")
+	for i := len(segments) - 1; i >= 0; i-- {
+		if id := normalizeContainerIDSegment(segments[i]); id != "" {
+			return id
+		}
+	}
+	return ""
+}
+
+func normalizeContainerIDValue(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return ""
+	}
+	if strings.Contains(value, "://") {
+		parts := strings.SplitN(value, "://", 2)
+		value = parts[1]
+	}
+	if strings.Contains(value, "/") {
+		if id := containerIDFromPath(value); id != "" {
+			return id
+		}
+	}
+	return normalizeContainerIDSegment(value)
+}
+
 func procContainerID(pid uint32) string {
 	if pid == 0 {
 		return ""
@@ -291,32 +363,142 @@ func procContainerID(pid uint32) string {
 		if len(parts) != 3 {
 			continue
 		}
-		path := parts[2]
-		segments := strings.Split(path, "/")
-		for i := len(segments) - 1; i >= 0; i-- {
-			seg := segments[i]
-			if seg == "" {
-				continue
-			}
-			// ANCHOR: Robust container ID parsing - Bugfix: containerd/cri-o cgroup paths - Mar 22, 2026
-			// Normalize common runtime prefixes/suffixes and require hex IDs to avoid
-			// mistaking pod UID segments for container IDs.
-			seg = strings.TrimSuffix(seg, ".scope")
-			seg = strings.TrimPrefix(seg, "docker-")
-			seg = strings.TrimPrefix(seg, "containerd-")
-			seg = strings.TrimPrefix(seg, "cri-containerd-")
-			seg = strings.TrimPrefix(seg, "crio-")
-			seg = strings.TrimPrefix(seg, "cri-o-")
-			seg = strings.TrimPrefix(seg, "libpod-")
-
-			// Container IDs are typically 64-hex chars; accept 32+ as fallback.
-			seg = strings.ToLower(seg)
-			if len(seg) >= 32 && isHexString(seg) {
-				return seg
-			}
+		if id := containerIDFromPath(parts[2]); id != "" {
+			return id
 		}
 	}
 	return ""
+}
+
+var errCgroupInodeMatch = errors.New("cgroup inode match")
+
+func containerIDFromCgroupID(cgroupID uint64) string {
+	if cgroupID == 0 {
+		return ""
+	}
+
+	var resolved string
+	walkErr := filepath.WalkDir("/sys/fs/cgroup", func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d == nil || !d.IsDir() {
+			return nil
+		}
+
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok || stat == nil || stat.Ino != cgroupID {
+			return nil
+		}
+
+		if id := containerIDFromPath(path); id != "" {
+			resolved = id
+			return errCgroupInodeMatch
+		}
+		return nil
+	})
+
+	if walkErr != nil && !errors.Is(walkErr, errCgroupInodeMatch) {
+		return ""
+	}
+	return resolved
+}
+
+func scanCgroupContainerMappings() map[string]uint64 {
+	mappings := make(map[string]uint64)
+
+	_ = filepath.WalkDir("/sys/fs/cgroup", func(path string, d fs.DirEntry, err error) error {
+		if err != nil || d == nil || !d.IsDir() {
+			return nil
+		}
+		containerID := containerIDFromPath(path)
+		if containerID == "" {
+			return nil
+		}
+		info, err := d.Info()
+		if err != nil {
+			return nil
+		}
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok || stat == nil || stat.Ino == 0 {
+			return nil
+		}
+		mappings[containerID] = stat.Ino
+		return nil
+	})
+
+	return mappings
+}
+
+func (e *Enricher) resolvePodMetadataFromCgroupMapping(ctx context.Context, cgroupID uint64) (*PodMetadata, error) {
+	if e.K8sClient == nil || cgroupID == 0 {
+		return nil, nil
+	}
+	mapping, found := e.K8sClient.GetCache().GetCgroupMapping(cgroupID)
+	if !found || mapping == "" {
+		return nil, nil
+	}
+	parts := strings.Split(mapping, "/")
+	if len(parts) != 2 {
+		return nil, nil
+	}
+	metadata, err := e.K8sClient.GetPodMetadata(ctx, parts[0], parts[1])
+	if err != nil {
+		return nil, err
+	}
+	return metadata, nil
+}
+
+func (e *Enricher) refreshCgroupPodMappings(ctx context.Context, force bool) {
+	if e.K8sClient == nil {
+		return
+	}
+
+	e.cgroupRefreshMutex.Lock()
+	defer e.cgroupRefreshMutex.Unlock()
+
+	if !force && !e.lastCgroupRefresh.IsZero() && time.Since(e.lastCgroupRefresh) < cgroupMappingRefreshInterval {
+		return
+	}
+	e.lastCgroupRefresh = time.Now()
+
+	containerCgroupMap := scanCgroupContainerMappings()
+	if len(containerCgroupMap) == 0 {
+		return
+	}
+
+	pods, err := e.K8sClient.ListAllPods(ctx)
+	if err != nil {
+		e.Logger.Debug("failed to refresh cgroup mappings from pod list", zap.Error(err))
+		return
+	}
+
+	for mapping, podMeta := range pods {
+		if podMeta == nil {
+			continue
+		}
+		containerID := normalizeContainerIDValue(podMeta.ContainerID)
+		if containerID == "" {
+			continue
+		}
+		cgroupID, found := containerCgroupMap[containerID]
+		if !found || cgroupID == 0 {
+			continue
+		}
+
+		e.cgroupToContainerMutex.Lock()
+		e.cgroupToContainerCache[cgroupID] = containerID
+		e.cgroupToContainerMutex.Unlock()
+
+		e.containerToPodMutex.Lock()
+		e.containerToPodCache[containerID] = mapping
+		e.containerToPodMutex.Unlock()
+
+		e.K8sClient.GetCache().SetContainerMapping(containerID, mapping)
+		e.K8sClient.GetCache().SetCgroupMapping(cgroupID, mapping)
+	}
 }
 
 func isHexString(value string) bool {
@@ -335,8 +517,57 @@ func isHexString(value string) bool {
 // getPodMetadata retrieves pod metadata from K8s API, using cache when available
 // ANCHOR: Pod metadata lookup via K8s API - Phase 2.2, Dec 26, 2025
 // First checks local enricher cache, then queries K8s API for pod metadata via container ID
-func (e *Enricher) getPodMetadata(ctx context.Context, containerID string) (*PodMetadata, error) {
-	if e.K8sClient == nil || containerID == "" {
+// cgroupID uint64 is used as fallback when /proc lookup fails (short-lived process race).
+func (e *Enricher) getPodMetadata(ctx context.Context, containerID string, cgroupID uint64) (*PodMetadata, error) {
+	if e.K8sClient == nil {
+		return nil, nil
+	}
+
+	// ANCHOR: CgroupID fallback lookup - Fix PR-23 #3 /proc race - Mar 25, 2026
+	// If /proc lookup failed (process exited), try multiple fallback paths:
+	// 1. Local cgroupID -> containerID cache
+	// 2. Resolve container ID directly from cgroup inode under /sys/fs/cgroup
+	// 3. K8s client cgroupID -> pod mapping cache (if available)
+	// 4. On miss, refresh cgroup<->pod mappings from /sys/fs/cgroup + K8s pods and retry
+	if containerID == "" && cgroupID != 0 {
+		// First try enricher's local cgroup->container cache
+		e.cgroupToContainerMutex.RLock()
+		cached, found := e.cgroupToContainerCache[cgroupID]
+		e.cgroupToContainerMutex.RUnlock()
+		if found && cached != "" {
+			containerID = cached
+		} else if resolved := containerIDFromCgroupID(cgroupID); resolved != "" {
+			containerID = resolved
+			e.cgroupToContainerMutex.Lock()
+			e.cgroupToContainerCache[cgroupID] = containerID
+			e.cgroupToContainerMutex.Unlock()
+		}
+
+		if containerID == "" {
+			// Try K8s client's cgroup->pod mapping for direct resolution
+			metadata, err := e.resolvePodMetadataFromCgroupMapping(ctx, cgroupID)
+			if err != nil {
+				e.Logger.Debug("failed to resolve pod by cgroup mapping", zap.Uint64("cgroupID", cgroupID), zap.Error(err))
+				return nil, err
+			}
+			if metadata != nil {
+				return metadata, nil
+			}
+
+			// Cold-cache fallback for first event: refresh cgroup<->pod mapping and retry once.
+			e.refreshCgroupPodMappings(ctx, false)
+			metadata, err = e.resolvePodMetadataFromCgroupMapping(ctx, cgroupID)
+			if err != nil {
+				e.Logger.Debug("failed to resolve pod by refreshed cgroup mapping", zap.Uint64("cgroupID", cgroupID), zap.Error(err))
+				return nil, err
+			}
+			if metadata != nil {
+				return metadata, nil
+			}
+		}
+	}
+
+	if containerID == "" {
 		return nil, nil
 	}
 
@@ -372,6 +603,16 @@ func (e *Enricher) getPodMetadata(ctx context.Context, containerID string) (*Pod
 		e.containerToPodMutex.Lock()
 		e.containerToPodCache[containerID] = mapping
 		e.containerToPodMutex.Unlock()
+
+		// Also cache cgroupID -> containerID mapping for fast fallback lookups
+		if cgroupID != 0 {
+			e.cgroupToContainerMutex.Lock()
+			e.cgroupToContainerCache[cgroupID] = containerID
+			e.cgroupToContainerMutex.Unlock()
+
+			// Register cgroup->pod mapping in K8s client cache for first-time events
+			e.K8sClient.GetCache().SetCgroupMapping(cgroupID, mapping)
+		}
 	}
 
 	return metadata, nil
@@ -443,6 +684,7 @@ func (e *Enricher) EnrichProcessEvent(
 	pidVal := uint32(fieldUintValue(v, "PID"))
 	uidVal := uint32(fieldUintValue(v, "UID"))
 	gidVal := uint32(fieldUintValue(v, "GID"))
+	cgroupIDVal := fieldUintValue(v, "CgroupID")
 	cmdVal := fieldStringValue(v, "Argv")
 	if cmdVal == "" {
 		cmdVal = fieldStringValue(v, "Filename")
@@ -461,7 +703,7 @@ func (e *Enricher) EnrichProcessEvent(
 	}
 
 	// Get pod metadata from K8s API (returns nil if not available)
-	podMeta, err := e.getPodMetadata(ctx, containerID)
+	podMeta, err := e.getPodMetadata(ctx, containerID, cgroupIDVal)
 	if err != nil {
 		return nil, err
 	}
@@ -610,11 +852,12 @@ func (e *Enricher) EnrichNetworkEvent(
 	// ANCHOR: Container context propagation - Feature: PID-based container lookup - Jan 2026
 	// Resolve container metadata from PID when available
 	pidVal := uint32(fieldUintValue(v, "PID"))
+	cgroupIDVal := fieldUintValue(v, "CgroupID")
 	containerID := procContainerID(pidVal)
 	containerCtx := &ContainerContext{
 		ContainerID: containerID,
 	}
-	podMeta, err := e.getPodMetadata(ctx, containerID)
+	podMeta, err := e.getPodMetadata(ctx, containerID, cgroupIDVal)
 	if err != nil {
 		return nil, err
 	}
@@ -711,11 +954,12 @@ func (e *Enricher) EnrichDNSEvent(
 	// ANCHOR: Container context propagation - Feature: PID-based container lookup - Jan 2026
 	// Resolve container metadata from PID when available
 	pidVal := uint32(fieldUintValue(v, "PID"))
+	cgroupIDVal := fieldUintValue(v, "CgroupID")
 	containerID := procContainerID(pidVal)
 	containerCtx := &ContainerContext{
 		ContainerID: containerID,
 	}
-	podMeta, err := e.getPodMetadata(ctx, containerID)
+	podMeta, err := e.getPodMetadata(ctx, containerID, cgroupIDVal)
 	if err != nil {
 		return nil, err
 	}
@@ -786,6 +1030,7 @@ func (e *Enricher) EnrichFileEvent(
 	pathVal := fieldStringValue(v, "Filename")
 	opVal := fileOperationName(fieldUintValue(v, "Operation"))
 	cmdVal := fieldStringValue(v, "Filename")
+	cgroupIDVal := fieldUintValue(v, "CgroupID")
 
 	// ANCHOR: Container context propagation - Feature: PID-based container lookup - Jan 2026
 	// Resolve container metadata from PID when available
@@ -793,7 +1038,7 @@ func (e *Enricher) EnrichFileEvent(
 	containerCtx := &ContainerContext{
 		ContainerID: containerID,
 	}
-	podMeta, err := e.getPodMetadata(ctx, containerID)
+	podMeta, err := e.getPodMetadata(ctx, containerID, cgroupIDVal)
 	if err != nil {
 		return nil, err
 	}
@@ -879,6 +1124,7 @@ func (e *Enricher) EnrichCapabilityEvent(
 	capabilityID := uint32(fieldUintValue(v, "Capability"))
 	allowedVal := fieldUintValue(v, "CheckType") != 2
 	nameVal := capabilityNameFromID(capabilityID)
+	cgroupIDVal := fieldUintValue(v, "CgroupID")
 
 	// ANCHOR: Container context propagation - Feature: PID-based container lookup - Jan 2026
 	// Resolve container metadata from PID when available
@@ -886,7 +1132,7 @@ func (e *Enricher) EnrichCapabilityEvent(
 	containerCtx := &ContainerContext{
 		ContainerID: containerID,
 	}
-	podMeta, err := e.getPodMetadata(ctx, containerID)
+	podMeta, err := e.getPodMetadata(ctx, containerID, cgroupIDVal)
 	if err != nil {
 		return nil, err
 	}
