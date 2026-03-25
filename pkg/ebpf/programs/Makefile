@@ -1,36 +1,37 @@
-# ANCHOR: eBPF Program Build System - Feature: libbpf CO-RE build - Mar 24, 2026
-# Compiles eBPF C programs with libbpf headers and generated vmlinux.h for CO-RE.
-# Output: .o bytecode files for LoadPrograms() in pkg/ebpf/loader.go
+# ANCHOR: eBPF Program Build System - Dec 27, 2025 / Mar 23, 2026
+# Builds libbpf-style tracepoint programs for embed + cilium/ebpf loading.
 
 CLANG ?= clang
-BPFTOOL ?= /usr/sbin/bpftool
-ARCH ?= x86
-CFLAGS := -O2 -g -target bpf -D__TARGET_ARCH_$(ARCH) -I. -I/usr/include -I/usr/include/bpf
 OUTPUT := bin
+ARCH := $(shell uname -m)
+ARCH_INCLUDE := /usr/include/$(ARCH)-linux-gnu
+TARGET_ARCH ?= x86
 VMLINUX ?= /sys/kernel/btf/vmlinux
 VMLINUX_H := vmlinux.h
+BPF_INCLUDE ?= /usr/include/bpf
+CFLAGS := -O2 -g -target bpf -D__TARGET_ARCH_$(TARGET_ARCH) -I$(ARCH_INCLUDE) -I$(BPF_INCLUDE) -I.
 
-# All eBPF programs
 TARGETS := $(OUTPUT)/process.o $(OUTPUT)/network.o $(OUTPUT)/file.o \
-           $(OUTPUT)/capability.o $(OUTPUT)/dns.o
+	$(OUTPUT)/capability.o $(OUTPUT)/dns.o
 
-.PHONY: all clean
+.PHONY: all clean vmlinux
 
-all: $(VMLINUX_H) $(OUTPUT) $(TARGETS)
+all: $(OUTPUT) $(VMLINUX_H) $(TARGETS)
 
-# Create output directory
 $(OUTPUT):
 	mkdir -p $(OUTPUT)
 
-# Generate CO-RE type header from kernel BTF
+# ANCHOR: vmlinux.h generation - Feature: CO-RE build pipeline - Mar 25, 2026
+# Generates vmlinux.h from kernel BTF before compiling eBPF objects.
 $(VMLINUX_H):
-	$(BPFTOOL) btf dump file $(VMLINUX) format c > $(VMLINUX_H)
+	bpftool btf dump file $(VMLINUX) format c > $(VMLINUX_H)
 
-# Compile eBPF C program to bytecode
-$(OUTPUT)/%.o: %.c common.h $(VMLINUX_H) | $(OUTPUT)
+vmlinux: $(VMLINUX_H)
+
+$(OUTPUT)/%.o: %.c $(VMLINUX_H) | $(OUTPUT)
 	$(CLANG) $(CFLAGS) -c $< -o $@
 
 clean:
-	rm -rf $(OUTPUT) $(VMLINUX_H)
+	rm -rf $(OUTPUT)
 
 .DEFAULT_GOAL := all

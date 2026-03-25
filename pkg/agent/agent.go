@@ -291,6 +291,7 @@ func (a *Agent) Start(ctx context.Context) error {
 				Enabled: a.Config.Agent.EBPF.RingBuffer.Enabled,
 				Size:    a.Config.Agent.EBPF.RingBuffer.Size,
 			},
+			KernelBTFPath: a.Config.Agent.EBPF.KernelBTFPath,
 		}
 
 		collection, err := ebpf.LoadProgramsWithOptions(a.Logger, loadOpts)

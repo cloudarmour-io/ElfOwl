@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"net"
 	"strings"
 	"sync"
 	"time"
@@ -112,6 +113,8 @@ func (dm *DNSMonitor) eventLoop(ctx context.Context) {
 			// Adds timestamp
 
 			queryType := dnsQueryTypeName(evt.QueryType)
+			responseName := dnsResponseCodeName(evt.ResponseCode)
+			serverIP := dnsServerIP(evt)
 
 			dnsCtx := &enrichment.DNSContext{
 				QueryName:    strings.TrimRight(string(evt.QueryName[:]), "\x00"),
@@ -132,7 +135,12 @@ func (dm *DNSMonitor) eventLoop(ctx context.Context) {
 			case dm.eventChan <- enriched:
 				dm.logger.Debug("dns event sent",
 					zap.Uint32("pid", evt.PID),
-					zap.String("domain", dnsCtx.QueryName))
+					zap.String("domain", dnsCtx.QueryName),
+					zap.String("query_type", dnsCtx.QueryType),
+					zap.Int("response_code", dnsCtx.ResponseCode),
+					zap.String("response_name", responseName),
+					zap.String("server", serverIP),
+					zap.Bool("allowed", dnsCtx.QueryAllowed))
 			case <-ctx.Done():
 				return
 			case <-dm.stopChan:
@@ -148,19 +156,19 @@ func (dm *DNSMonitor) eventLoop(ctx context.Context) {
 // dnsQueryTypeName maps DNS query type number to name (RFC 1035)
 func dnsQueryTypeName(qtype uint16) string {
 	queryNames := map[uint16]string{
-		1:    "A",
-		2:    "NS",
-		5:    "CNAME",
-		6:    "SOA",
-		12:   "PTR",
-		15:   "MX",
-		16:   "TXT",
-		28:   "AAAA",
-		33:   "SRV",
-		42:   "NAPTR",
-		43:   "DS",
-		48:   "DNSKEY",
-		255:  "ANY",
+		1:   "A",
+		2:   "NS",
+		5:   "CNAME",
+		6:   "SOA",
+		12:  "PTR",
+		15:  "MX",
+		16:  "TXT",
+		28:  "AAAA",
+		33:  "SRV",
+		42:  "NAPTR",
+		43:  "DS",
+		48:  "DNSKEY",
+		255: "ANY",
 	}
 
 	if name, ok := queryNames[qtype]; ok {
@@ -189,6 +197,19 @@ func dnsResponseCodeName(rcode uint8) string {
 		return name
 	}
 	return fmt.Sprintf("RCODE%d", rcode)
+}
+
+// ANCHOR: DNS server parsing - Feature: IPv6 server visibility - Mar 25, 2026
+// Converts server bytes + family into a printable address.
+func dnsServerIP(evt *DNSEvent) string {
+	switch evt.ServerFamily {
+	case AF_INET:
+		return net.IPv4(evt.Server[0], evt.Server[1], evt.Server[2], evt.Server[3]).String()
+	case AF_INET6:
+		return net.IP(evt.Server[:]).String()
+	default:
+		return ""
+	}
 }
 
 // EventChan returns the channel for receiving events

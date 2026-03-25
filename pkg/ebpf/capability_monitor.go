@@ -112,6 +112,8 @@ func (cm *CapabilityMonitor) eventLoop(ctx context.Context) {
 			capName := capabilityName(evt.Capability)
 			allowed := evt.CheckType != 2
 
+			// ANCHOR: Capability syscall attribution mapping - Feature: syscall_id in enrichment - Mar 25, 2026
+			// Propagates syscall_id from eBPF events into the CapabilityContext.
 			capCtx := &enrichment.CapabilityContext{
 				Name:      capName,
 				Allowed:   allowed,
@@ -131,7 +133,10 @@ func (cm *CapabilityMonitor) eventLoop(ctx context.Context) {
 			case cm.eventChan <- enriched:
 				cm.logger.Debug("capability event sent",
 					zap.Uint32("pid", evt.PID),
-					zap.String("capability", capName))
+					zap.String("capability", capName),
+					zap.Uint8("check_type", evt.CheckType),
+					zap.Uint32("syscall_id", evt.SyscallID),
+					zap.String("syscall", string(bytes.TrimRight(evt.SyscallName[:], "\x00"))))
 			case <-ctx.Done():
 				return
 			case <-cm.stopChan:
@@ -156,37 +161,39 @@ func capabilityName(cap uint32) string {
 		5:  "CAP_KILL",
 		6:  "CAP_SETGID",
 		7:  "CAP_SETUID",
-		8:  "CAP_SETFCAP",
-		9:  "CAP_SETPCAP",
-		10: "CAP_NET_RAW",
-		11: "CAP_NET_BIND_SERVICE",
+		8:  "CAP_SETPCAP",
+		9:  "CAP_LINUX_IMMUTABLE",
+		10: "CAP_NET_BIND_SERVICE",
+		11: "CAP_NET_BROADCAST",
 		12: "CAP_NET_ADMIN",
-		13: "CAP_NET_BROADCAST",
-		14: "CAP_SYS_CHROOT",
-		15: "CAP_SYS_MODULE",
-		16: "CAP_SYS_PTRACE",
+		13: "CAP_NET_RAW",
+		14: "CAP_IPC_LOCK",
+		15: "CAP_IPC_OWNER",
+		16: "CAP_SYS_MODULE",
 		17: "CAP_SYS_RAWIO",
-		18: "CAP_SYS_PACCT",
-		19: "CAP_SYS_ADMIN",
-		20: "CAP_SYS_BOOT",
-		21: "CAP_SYS_NICE",
-		22: "CAP_SYS_RESOURCE",
-		23: "CAP_SYS_TIME",
-		24: "CAP_SYS_TTY_CONFIG",
-		25: "CAP_MKNOD",
-		26: "CAP_LEASE",
-		27: "CAP_AUDIT_WRITE",
-		28: "CAP_AUDIT_CONTROL",
-		29: "CAP_SETFATTR",
-		30: "CAP_MAC_OVERRIDE",
-		31: "CAP_MAC_ADMIN",
-		32: "CAP_SYSLOG",
-		33: "CAP_WAKE_ALARM",
-		34: "CAP_BLOCK_SUSPEND",
-		35: "CAP_AUDIT_READ",
-		36: "CAP_PERFMON",
-		37: "CAP_BPF",
-		38: "CAP_CHECKPOINT_RESTORE",
+		18: "CAP_SYS_CHROOT",
+		19: "CAP_SYS_PTRACE",
+		20: "CAP_SYS_PACCT",
+		21: "CAP_SYS_ADMIN",
+		22: "CAP_SYS_BOOT",
+		23: "CAP_SYS_NICE",
+		24: "CAP_SYS_RESOURCE",
+		25: "CAP_SYS_TIME",
+		26: "CAP_SYS_TTY_CONFIG",
+		27: "CAP_MKNOD",
+		28: "CAP_LEASE",
+		29: "CAP_AUDIT_WRITE",
+		30: "CAP_AUDIT_CONTROL",
+		31: "CAP_SETFCAP",
+		32: "CAP_MAC_OVERRIDE",
+		33: "CAP_MAC_ADMIN",
+		34: "CAP_SYSLOG",
+		35: "CAP_WAKE_ALARM",
+		36: "CAP_BLOCK_SUSPEND",
+		37: "CAP_AUDIT_READ",
+		38: "CAP_PERFMON",
+		39: "CAP_BPF",
+		40: "CAP_CHECKPOINT_RESTORE",
 	}
 
 	if name, ok := capNames[cap]; ok {

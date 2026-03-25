@@ -204,9 +204,6 @@ enriched events due to missing pod metadata.
 
 Fixes: #74
 
-🤖 Generated with Claude Code
-
-Co-Authored-By: Claude <noreply@anthropic.com>
 ```
 
 ---

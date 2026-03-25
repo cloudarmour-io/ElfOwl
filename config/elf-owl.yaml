@@ -15,6 +15,7 @@ agent:
   # cilium/ebpf Security Monitors (Phase 3: goBPF migration complete)
   ebpf:
     enabled: true  # Master switch - must be true to enable any monitors
+    kernel_btf_path: ""  # Optional override for kernel BTF (CO-RE)
     process:
       enabled: true
       buffer_size: 8192

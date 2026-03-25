@@ -10,7 +10,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
+
+	"github.com/cilium/ebpf/btf"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
@@ -43,7 +46,8 @@ type ProgramSet struct {
 	// Program is the loaded eBPF program (e.g., sched_process_exec tracepoint)
 	Program *ebpf.Program
 
-	// Programs holds all loaded programs for this set (multiple tracepoints).
+	// ANCHOR: Multi-program support - Feature: advanced tracepoints - Mar 25, 2026
+	// Track all programs loaded from the collection so multi-tracepoint modules close cleanly.
 	Programs map[string]*ebpf.Program
 
 	// Maps contains all maps used by this program (perf buffers, ring buffers, etc.)
@@ -83,13 +87,14 @@ type RingBufferOptions struct {
 
 // LoadOptions defines which programs to load and how to configure readers.
 type LoadOptions struct {
-	Process    ProgramConfig
-	Network    ProgramConfig
-	File       ProgramConfig
-	Capability ProgramConfig
-	DNS        ProgramConfig
-	PerfBuffer PerfBufferOptions
-	RingBuffer RingBufferOptions
+	Process       ProgramConfig
+	Network       ProgramConfig
+	File          ProgramConfig
+	Capability    ProgramConfig
+	DNS           ProgramConfig
+	PerfBuffer    PerfBufferOptions
+	RingBuffer    RingBufferOptions
+	KernelBTFPath string
 }
 
 // ============================================================================
@@ -127,14 +132,7 @@ type programDefinition struct {
 	MapName         string
 	TracepointGroup string
 	TracepointName  string
-	Tracepoints     []TracepointSpec
 	Config          ProgramConfig
-}
-
-// TracepointSpec describes a tracepoint attachment target.
-type TracepointSpec struct {
-	Group string
-	Name  string
 }
 
 // DefaultLoadOptions enables all programs with perf buffers by default.
@@ -151,42 +149,31 @@ func DefaultLoadOptions() LoadOptions {
 }
 
 func programDefinitions(opts LoadOptions) []programDefinition {
-	// ANCHOR: Multi-tracepoint program definitions - Feature: expanded probes - Mar 24, 2026
-	// Defines all tracepoints to attach per program for richer event coverage.
 	return []programDefinition{
 		{
 			Name:            ProcessProgramName,
 			Description:     "process execution",
 			MapName:         ProcessEventsMap,
-			TracepointGroup: "raw_syscalls",
-			TracepointName:  "sys_enter",
-			Tracepoints: []TracepointSpec{
-				{Group: "raw_syscalls", Name: "sys_enter"},
-			},
-			Config: opts.Process,
+			// ANCHOR: Process tracepoint selection - Feature: execve/execveat - Mar 25, 2026
+			TracepointGroup: "syscalls",
+			TracepointName:  "sys_enter_execve",
+			Config:          opts.Process,
 		},
 		{
 			Name:            NetworkProgramName,
 			Description:     "network connections",
 			MapName:         NetworkEventsMap,
-			TracepointGroup: "sock",
-			TracepointName:  "inet_sock_set_state",
-			Tracepoints: []TracepointSpec{
-				{Group: "sock", Name: "inet_sock_set_state"},
-				{Group: "raw_syscalls", Name: "sys_enter"},
-			},
-			Config: opts.Network,
+			TracepointGroup: "tcp",
+			TracepointName:  "tcp_connect",
+			Config:          opts.Network,
 		},
 		{
 			Name:            FileProgramName,
 			Description:     "file access",
 			MapName:         FileEventsMap,
-			TracepointGroup: "raw_syscalls",
-			TracepointName:  "sys_enter",
-			Tracepoints: []TracepointSpec{
-				{Group: "raw_syscalls", Name: "sys_enter"},
-			},
-			Config: opts.File,
+			TracepointGroup: "syscalls",
+			TracepointName:  "sys_enter_openat",
+			Config:          opts.File,
 		},
 		{
 			Name:            CapabilityProgramName,
@@ -194,23 +181,15 @@ func programDefinitions(opts LoadOptions) []programDefinition {
 			MapName:         CapabilityEventsMap,
 			TracepointGroup: "capability",
 			TracepointName:  "cap_capable",
-			Tracepoints: []TracepointSpec{
-				{Group: "raw_syscalls", Name: "sys_enter"},
-				{Group: "capability", Name: "cap_capable"},
-			},
-			Config: opts.Capability,
+			Config:          opts.Capability,
 		},
 		{
 			Name:            DNSProgramName,
 			Description:     "DNS queries",
 			MapName:         DNSEventsMap,
-			TracepointGroup: "raw_syscalls",
-			TracepointName:  "sys_enter",
-			Tracepoints: []TracepointSpec{
-				{Group: "raw_syscalls", Name: "sys_enter"},
-				{Group: "raw_syscalls", Name: "sys_exit"},
-			},
-			Config: opts.DNS,
+			TracepointGroup: "syscalls",
+			TracepointName:  "sys_enter_sendto",
+			Config:          opts.DNS,
 		},
 	}
 }
@@ -236,131 +215,189 @@ func loadProgramSet(logger *zap.Logger, def programDefinition, opts LoadOptions)
 		return nil, fmt.Errorf("parse bytecode: %w", err)
 	}
 
-	collection, err := ebpf.NewCollection(spec)
+	// ANCHOR: Kernel BTF override - Feature: CO-RE portability - Mar 25, 2026
+	// Allows loading CO-RE programs against an explicit kernel BTF path.
+	var kernelTypes *btf.Spec
+	if opts.KernelBTFPath != "" {
+		btfSpec, err := btf.LoadSpec(opts.KernelBTFPath)
+		if err != nil {
+			return nil, fmt.Errorf("load kernel BTF spec: %w", err)
+		}
+		kernelTypes = btfSpec
+	}
+
+	collection, err := ebpf.NewCollectionWithOptions(spec, ebpf.CollectionOptions{
+		Programs: ebpf.ProgramOptions{
+			KernelTypes: kernelTypes,
+		},
+	})
 	if err != nil {
 		return nil, fmt.Errorf("load collection: %w", err)
 	}
 
-	var (
-		links           []link.Link
-		programs        = make(map[string]*ebpf.Program)
-		primaryProg     *ebpf.Program
-		primaryProgName string
-	)
-
-	if len(def.Tracepoints) > 0 {
-		for _, tpSpec := range def.Tracepoints {
-			progName, prog := selectTracepointProgramFor(collection.Programs, tpSpec.Group, tpSpec.Name)
-			if prog == nil {
-				collection.Close()
-				return nil, fmt.Errorf("no tracepoint program found for %s/%s in %s", tpSpec.Group, tpSpec.Name, def.Name)
-			}
-
-			tp, err := link.Tracepoint(tpSpec.Group, tpSpec.Name, prog, nil)
-			if err != nil {
-				for _, lnk := range links {
-					if lnk != nil {
-						_ = lnk.Close()
-					}
-				}
-				collection.Close()
-				return nil, fmt.Errorf("attach tracepoint %s/%s: %w", tpSpec.Group, tpSpec.Name, err)
-			}
-
-			if primaryProg == nil {
-				primaryProg = prog
-				primaryProgName = progName
-			}
-			programs[progName] = prog
-			links = append(links, tp)
+	sectionByName := make(map[string]string, len(spec.Programs))
+	for name, progSpec := range spec.Programs {
+		if progSpec == nil {
+			continue
 		}
-	} else {
-		progName, prog := selectTracepointProgram(collection.Programs)
-		if prog == nil {
-			collection.Close()
-			return nil, fmt.Errorf("no tracepoint program found in %s", def.Name)
-		}
+		sectionByName[name] = progSpec.SectionName
+	}
 
-		tp, err := link.Tracepoint(def.TracepointGroup, def.TracepointName, prog, nil)
-		if err != nil {
-			collection.Close()
-			return nil, fmt.Errorf("attach tracepoint %s/%s: %w", def.TracepointGroup, def.TracepointName, err)
-		}
-		primaryProg = prog
-		primaryProgName = progName
-		programs[progName] = prog
-		links = []link.Link{tp}
+	// ANCHOR: Multi-tracepoint attach - Feature: advanced probes - Mar 25, 2026
+	// Attach every tracepoint/raw_tracepoint section found in the collection.
+	links, programs, attachInfo, err := attachPrograms(collection.Programs, sectionByName)
+	if err != nil {
+		collection.Close()
+		return nil, err
+	}
+	if len(programs) == 0 {
+		collection.Close()
+		return nil, fmt.Errorf("no tracepoint programs found in %s", def.Name)
 	}
 
 	mapName, eventMap := selectEventMap(collection.Maps, def.MapName)
 	if eventMap == nil {
-		tp.Close()
+		closeLinks(links)
 		collection.Close()
 		return nil, fmt.Errorf("event map %s not found", def.MapName)
 	}
 
 	reader, err := createReader(eventMap, def, opts, logger)
 	if err != nil {
-		for _, lnk := range links {
-			if lnk != nil {
-				_ = lnk.Close()
-			}
-		}
+		closeLinks(links)
 		collection.Close()
 		return nil, fmt.Errorf("create event reader: %w", err)
 	}
 
 	if logger != nil {
-		logger.Info("loaded eBPF program",
-			zap.String("program", def.Name),
-			zap.String("section", primaryProgName),
-			zap.String("map", mapName),
-			zap.Int("tracepoints", len(links)),
-		)
+		for _, info := range attachInfo {
+			logger.Info("loaded eBPF program",
+				zap.String("program", def.Name),
+				zap.String("section", info.Section),
+				zap.String("map", mapName),
+				zap.String("attach_type", info.AttachKind),
+				zap.String("tracepoint", info.Tracepoint),
+			)
+		}
+	}
+
+	allMaps := make(map[string]*ebpf.Map, len(collection.Maps))
+	for name, m := range collection.Maps {
+		if m != nil {
+			allMaps[name] = m
+		}
+	}
+
+	var primary *ebpf.Program
+	for _, prog := range programs {
+		primary = prog
+		break
 	}
 
 	return &ProgramSet{
-		Program:  primaryProg,
+		Program:  primary,
 		Programs: programs,
-		Maps:     collection.Maps,
+		Maps:     allMaps,
 		Reader:   reader,
 		Links:    links,
 		Logger:   logger,
 	}, nil
 }
 
-// ANCHOR: Tracepoint program selection - Feature: multi-tracepoint attach - Mar 24, 2026
-// Selects the program matching a specific tracepoint group/name.
-func selectTracepointProgramFor(programs map[string]*ebpf.Program, group, name string) (string, *ebpf.Program) {
-	if programs == nil {
-		return "", nil
-	}
 
-	expected := fmt.Sprintf("tracepoint__%s__%s", group, name)
-	if prog, ok := programs[expected]; ok {
-		return expected, prog
-	}
+// ANCHOR: Multi-tracepoint attach helpers - Feature: advanced probes - Mar 25, 2026
+// Parses program sections and attaches every tracepoint/raw_tracepoint program.
+type attachInfo struct {
+	ProgramName string
+	Section     string
+	AttachKind  string
+	Tracepoint  string
+}
 
-	alt := fmt.Sprintf("tracepoint/%s/%s", group, name)
-	if prog, ok := programs[alt]; ok {
-		return alt, prog
-	}
+func attachPrograms(programs map[string]*ebpf.Program, sections map[string]string) ([]link.Link, map[string]*ebpf.Program, []attachInfo, error) {
+	links := make([]link.Link, 0)
+	attached := make(map[string]*ebpf.Program)
+	infos := make([]attachInfo, 0)
 
-	var candidateName string
-	var candidate *ebpf.Program
-	count := 0
-	for progName, prog := range programs {
-		if prog != nil && prog.Type() == ebpf.TracePoint {
-			candidateName = progName
-			candidate = prog
-			count++
+	for name, prog := range programs {
+		if prog == nil {
+			continue
 		}
-	}
-	if count == 1 {
-		return candidateName, candidate
+		section := sections[name]
+		kind, group, tpName, ok := parseTracepointSection(section)
+		if !ok {
+			continue
+		}
+
+		var (
+			lnk link.Link
+			err error
+		)
+
+		switch kind {
+		case "tracepoint":
+			lnk, err = link.Tracepoint(group, tpName, prog, nil)
+		case "raw_tracepoint":
+			lnk, err = link.AttachRawTracepoint(link.RawTracepointOptions{
+				Name:    tpName,
+				Program: prog,
+			})
+		default:
+			continue
+		}
+
+		if err != nil {
+			closeLinks(links)
+			return nil, nil, nil, fmt.Errorf("attach program %s (%s): %w", name, section, err)
+		}
+
+		links = append(links, lnk)
+		attached[name] = prog
+		tracepoint := tpName
+		if kind == "tracepoint" {
+			tracepoint = fmt.Sprintf("%s/%s", group, tpName)
+		}
+		infos = append(infos, attachInfo{
+			ProgramName: name,
+			Section:     section,
+			AttachKind:  kind,
+			Tracepoint:  tracepoint,
+		})
 	}
 
-	return "", nil
+	return links, attached, infos, nil
+}
+
+func parseTracepointSection(section string) (kind, group, name string, ok bool) {
+	if strings.HasPrefix(section, "tracepoint/") {
+		parts := strings.Split(section, "/")
+		if len(parts) < 3 {
+			return "", "", "", false
+		}
+		group = parts[1]
+		name = strings.Join(parts[2:], "/")
+		if group == "" || name == "" {
+			return "", "", "", false
+		}
+		return "tracepoint", group, name, true
+	}
+	if strings.HasPrefix(section, "raw_tracepoint/") {
+		name = strings.TrimPrefix(section, "raw_tracepoint/")
+		if name == "" {
+			return "", "", "", false
+		}
+		return "raw_tracepoint", "", name, true
+	}
+	return "", "", "", false
+}
+
+func closeLinks(links []link.Link) {
+	for _, lnk := range links {
+		if lnk == nil {
+			continue
+		}
+		_ = lnk.Close()
+	}
 }
 
 // ANCHOR: Tracepoint program selection - Utility: pick tracepoint program - Mar 23, 2026
@@ -372,11 +409,34 @@ func selectTracepointProgram(programs map[string]*ebpf.Program) (string, *ebpf.P
 		}
 	}
 	for name, prog := range programs {
+		if prog != nil && prog.Type() == ebpf.RawTracepoint {
+			return name, prog
+		}
+	}
+	for name, prog := range programs {
 		if prog != nil {
 			return name, prog
 		}
 	}
 	return "", nil
+}
+
+func attachProgram(def programDefinition, prog *ebpf.Program) (link.Link, error) {
+	if prog == nil {
+		return nil, fmt.Errorf("program is nil")
+	}
+
+	switch prog.Type() {
+	case ebpf.TracePoint:
+		return link.Tracepoint(def.TracepointGroup, def.TracepointName, prog, nil)
+	case ebpf.RawTracepoint:
+		return link.AttachRawTracepoint(link.RawTracepointOptions{
+			Name:    def.TracepointName,
+			Program: prog,
+		})
+	default:
+		return nil, fmt.Errorf("unsupported attach type %s", prog.Type())
+	}
 }
 
 // ANCHOR: Event map selection - Utility: perf/ringbuf map lookup - Mar 23, 2026
@@ -584,31 +644,42 @@ func (ps *ProgramSet) Close() error {
 		}
 	}
 
-	// Close all maps
+	// ANCHOR: Close all loaded maps once - Fix: helper-map fd lifecycle - Mar 25, 2026
+	// ProgramSet now tracks all maps from the collection; de-duplicate by pointer
+	// in case multiple map names alias the same map object.
+	closedMaps := make(map[*ebpf.Map]struct{}, len(ps.Maps))
 	for name, m := range ps.Maps {
-		if m != nil {
-			if err := m.Close(); err != nil {
-				errs = append(errs, fmt.Errorf("close map %s: %w", name, err))
-			}
+		if m == nil {
+			continue
+		}
+		if _, seen := closedMaps[m]; seen {
+			continue
+		}
+		closedMaps[m] = struct{}{}
+		if err := m.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("close map %s: %w", name, err))
 		}
 	}
 
-	// ANCHOR: Close all eBPF programs - Feature: multi-program cleanup - Mar 24, 2026
-	// Ensures every attached tracepoint program is released on shutdown.
-	// Falls back to single-program close for legacy program sets.
-	// Close programs
-	if len(ps.Programs) > 0 {
-		for name, prog := range ps.Programs {
-			if prog == nil {
-				continue
-			}
-			if err := prog.Close(); err != nil {
-				errs = append(errs, fmt.Errorf("close program %s: %w", name, err))
-			}
+	// Close programs (de-duplicate in case Program also appears in Programs)
+	closedPrograms := make(map[*ebpf.Program]struct{}, len(ps.Programs))
+	for name, prog := range ps.Programs {
+		if prog == nil {
+			continue
 		}
-	} else if ps.Program != nil {
-		if err := ps.Program.Close(); err != nil {
-			errs = append(errs, fmt.Errorf("close program: %w", err))
+		if _, seen := closedPrograms[prog]; seen {
+			continue
+		}
+		closedPrograms[prog] = struct{}{}
+		if err := prog.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("close program %s: %w", name, err))
+		}
+	}
+	if ps.Program != nil {
+		if _, seen := closedPrograms[ps.Program]; !seen {
+			if err := ps.Program.Close(); err != nil {
+				errs = append(errs, fmt.Errorf("close program: %w", err))
+			}
 		}
 	}
 

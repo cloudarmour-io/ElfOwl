@@ -115,31 +115,14 @@ func (nm *NetworkMonitor) eventLoop(ctx context.Context) {
 				protocol = "udp"
 			}
 
-			direction := "unknown"
-			switch evt.Direction {
-			case 1:
-				direction = "outbound"
-			case 2:
-				direction = "inbound"
-			}
-
-			srcIP := ""
-			dstIP := ""
-			if evt.Family == AF_INET6 {
-				srcIP = net.IP(evt.SAddrV6[:]).String()
-				dstIP = net.IP(evt.DAddrV6[:]).String()
-			} else {
-				srcIP = net.IPv4(byte(evt.SAddr), byte(evt.SAddr>>8), byte(evt.SAddr>>16), byte(evt.SAddr>>24)).String()
-				dstIP = net.IPv4(byte(evt.DAddr), byte(evt.DAddr>>8), byte(evt.DAddr>>16), byte(evt.DAddr>>24)).String()
-			}
-
+			sourceIP, destinationIP := networkIPs(evt)
 			netCtx := &enrichment.NetworkContext{
-				SourceIP:           srcIP,
-				DestinationIP:      dstIP,
+				SourceIP:           sourceIP,
+				DestinationIP:      destinationIP,
 				SourcePort:         evt.SPort,
 				DestinationPort:    evt.DPort,
 				Protocol:           protocol,
-				Direction:          direction,
+				Direction:          networkDirection(evt.Direction),
 				ConnectionState:    tcpStateName(evt.State),
 				NetworkNamespaceID: evt.NetNS,
 			}
@@ -156,7 +139,11 @@ func (nm *NetworkMonitor) eventLoop(ctx context.Context) {
 			case nm.eventChan <- enriched:
 				nm.logger.Debug("network event sent",
 					zap.Uint32("pid", evt.PID),
-					zap.String("dest", netCtx.DestinationIP))
+					zap.String("src", netCtx.SourceIP),
+					zap.Uint16("src_port", netCtx.SourcePort),
+					zap.String("dest", netCtx.DestinationIP),
+					zap.Uint16("dest_port", netCtx.DestinationPort),
+					zap.String("protocol", netCtx.Protocol))
 			case <-ctx.Done():
 				return
 			case <-nm.stopChan:
@@ -169,13 +156,19 @@ func (nm *NetworkMonitor) eventLoop(ctx context.Context) {
 	}
 }
 
-// EventChan returns the channel for receiving events
-func (nm *NetworkMonitor) EventChan() <-chan *enrichment.EnrichedEvent {
-	return nm.eventChan
+// ANCHOR: Network direction/state mapping - Feature: advanced telemetry - Mar 25, 2026
+// Converts kernel numeric enums to human-readable strings for enrichment.
+func networkDirection(direction uint8) string {
+	switch direction {
+	case 1:
+		return "outbound"
+	case 2:
+		return "inbound"
+	default:
+		return "unknown"
+	}
 }
 
-// ANCHOR: TCP state mapping - Feature: connection state enrichment - Mar 24, 2026
-// Maps TCP state numeric values to human-readable strings for rule evaluation.
 func tcpStateName(state uint8) string {
 	switch state {
 	case 1:
@@ -200,9 +193,25 @@ func tcpStateName(state uint8) string {
 		return "LISTEN"
 	case 11:
 		return "CLOSING"
+	case 12:
+		return "NEW_SYN_RECV"
 	default:
 		return "UNKNOWN"
 	}
+}
+
+func networkIPs(evt *NetworkEvent) (string, string) {
+	if evt.Family == AF_INET6 {
+		return net.IP(evt.SAddrV6[:]).String(), net.IP(evt.DAddrV6[:]).String()
+	}
+	source := net.IPv4(byte(evt.SAddr), byte(evt.SAddr>>8), byte(evt.SAddr>>16), byte(evt.SAddr>>24)).String()
+	destination := net.IPv4(byte(evt.DAddr), byte(evt.DAddr>>8), byte(evt.DAddr>>16), byte(evt.DAddr>>24)).String()
+	return source, destination
+}
+
+// EventChan returns the channel for receiving events
+func (nm *NetworkMonitor) EventChan() <-chan *enrichment.EnrichedEvent {
+	return nm.eventChan
 }
 
 // Stop stops the monitor and waits for goroutine to finish
