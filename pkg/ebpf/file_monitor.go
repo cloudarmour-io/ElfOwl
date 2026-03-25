@@ -124,10 +124,14 @@ func (fm *FileMonitor) eventLoop(ctx context.Context) {
 				opType = "unknown"
 			}
 
+			// ANCHOR: File context mode + fd mapping - Feature: syscall coverage expansion - Mar 25, 2026
+			// Propagates mode and fd metadata from eBPF events into FileContext.
 			fileCtx := &enrichment.FileContext{
 				Path:      strings.TrimRight(string(evt.Filename[:]), "\x00"),
 				Operation: opType,
 				PID:       evt.PID,
+				Mode:      evt.Mode,
+				FD:        evt.FD,
 			}
 
 			enriched := &enrichment.EnrichedEvent{
