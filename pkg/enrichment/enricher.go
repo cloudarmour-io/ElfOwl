@@ -479,25 +479,35 @@ func (e *Enricher) refreshCgroupPodMappings(ctx context.Context, force bool) {
 		if podMeta == nil {
 			continue
 		}
-		containerID := normalizeContainerIDValue(podMeta.ContainerID)
-		if containerID == "" {
-			continue
+
+		// ANCHOR: Multi-container cgroup mapping registration - Fix PR-23 #6 - Mar 26, 2026
+		// Loop over all container IDs (main + init + ephemeral) so every container in a pod
+		// gets a cgroupID → pod mapping registered. Previously only the first container was mapped.
+		containerIDs := podMeta.ContainerIDs
+		if len(containerIDs) == 0 && podMeta.ContainerID != "" {
+			containerIDs = []string{podMeta.ContainerID}
 		}
-		cgroupID, found := containerCgroupMap[containerID]
-		if !found || cgroupID == 0 {
-			continue
+		for _, rawID := range containerIDs {
+			containerID := normalizeContainerIDValue(rawID)
+			if containerID == "" {
+				continue
+			}
+			cgroupID, found := containerCgroupMap[containerID]
+			if !found || cgroupID == 0 {
+				continue
+			}
+
+			e.cgroupToContainerMutex.Lock()
+			e.cgroupToContainerCache[cgroupID] = containerID
+			e.cgroupToContainerMutex.Unlock()
+
+			e.containerToPodMutex.Lock()
+			e.containerToPodCache[containerID] = mapping
+			e.containerToPodMutex.Unlock()
+
+			e.K8sClient.GetCache().SetContainerMapping(containerID, mapping)
+			e.K8sClient.GetCache().SetCgroupMapping(cgroupID, mapping)
 		}
-
-		e.cgroupToContainerMutex.Lock()
-		e.cgroupToContainerCache[cgroupID] = containerID
-		e.cgroupToContainerMutex.Unlock()
-
-		e.containerToPodMutex.Lock()
-		e.containerToPodCache[containerID] = mapping
-		e.containerToPodMutex.Unlock()
-
-		e.K8sClient.GetCache().SetContainerMapping(containerID, mapping)
-		e.K8sClient.GetCache().SetCgroupMapping(cgroupID, mapping)
 	}
 }
 

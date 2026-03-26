@@ -752,7 +752,44 @@ func (c *Client) ListAllPods(ctx context.Context) (map[string]*PodMetadata, erro
 			Labels:         pod.Labels,
 		}
 
-		// Extract container ID and image from first container
+		// ANCHOR: All-container ID extraction for multi-container mapping - Fix PR-23 #6 - Mar 26, 2026
+		// Iterate ContainerStatuses, InitContainerStatuses, EphemeralContainerStatuses to collect
+		// all container IDs so sidecars and init containers get cgroup→pod mappings registered.
+		for _, cs := range pod.Status.ContainerStatuses {
+			if cs.ContainerID == "" {
+				continue
+			}
+			parts := strings.Split(cs.ContainerID, "://")
+			id := cs.ContainerID
+			if len(parts) == 2 {
+				id = parts[1]
+			}
+			podMeta.ContainerIDs = append(podMeta.ContainerIDs, id)
+		}
+		for _, cs := range pod.Status.InitContainerStatuses {
+			if cs.ContainerID == "" {
+				continue
+			}
+			parts := strings.Split(cs.ContainerID, "://")
+			id := cs.ContainerID
+			if len(parts) == 2 {
+				id = parts[1]
+			}
+			podMeta.ContainerIDs = append(podMeta.ContainerIDs, id)
+		}
+		for _, cs := range pod.Status.EphemeralContainerStatuses {
+			if cs.ContainerID == "" {
+				continue
+			}
+			parts := strings.Split(cs.ContainerID, "://")
+			id := cs.ContainerID
+			if len(parts) == 2 {
+				id = parts[1]
+			}
+			podMeta.ContainerIDs = append(podMeta.ContainerIDs, id)
+		}
+
+		// Keep ContainerID/ContainerName/Image from first main container for backward compat
 		if len(pod.Status.ContainerStatuses) > 0 {
 			cs := pod.Status.ContainerStatuses[0]
 			podMeta.Image = cs.ImageID
@@ -798,6 +835,10 @@ type PodMetadata struct {
 	// CgroupID captured from kernel for race-free pod resolution when /proc fails
 	ContainerID string
 	CgroupID    uint64
+	// ANCHOR: All container IDs for multi-container pod mapping - Fix PR-23 #6 - Mar 26, 2026
+	// Includes IDs from ContainerStatuses, InitContainerStatuses, EphemeralContainerStatuses.
+	// Used by refreshCgroupPodMappings to register cgroup mappings for all containers.
+	ContainerIDs []string
 
 	// ANCHOR: Security context fields extracted from pod spec - Phase 2.2 fix, Dec 26, 2025
 	// These fields are populated by extracting values from pod.Spec security context
