@@ -43,6 +43,7 @@ type MetricsRecorder interface {
 	RecordViolationsFound(n int)
 	RecordEnrichmentError()
 	RecordHostEventDiscarded()
+	RecordK8sLookupFailedDiscarded()
 	SetEventsBuffered(count int)
 }
 
@@ -446,7 +447,9 @@ func (a *Agent) handleRuntimeEvent(
 			a.MetricsRegistry.RecordEnrichmentError()
 			if a.Config.Agent.Enrichment.KubernetesOnly {
 				a.Logger.Debug(apiDiscardMsg, zap.Error(err))
-				a.MetricsRegistry.RecordHostEventDiscarded()
+				// ANCHOR: K8s lookup fail-closed discard metric - Fix PR-23 #7 - Mar 26, 2026
+				// Record separately from host events to distinguish API failures from true host events.
+				a.MetricsRegistry.RecordK8sLookupFailedDiscarded()
 				return
 			}
 			a.Logger.Debug(apiFallbackMsg, zap.Error(err))
