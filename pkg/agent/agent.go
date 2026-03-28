@@ -153,22 +153,20 @@ func NewAgent(config *Config) (*Agent, error) {
 		}
 	}
 
-	// Initialize Kubernetes client
-	k8sClient, err := kubernetes.NewClient(config.Agent.Kubernetes.InCluster)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create kubernetes client: %w", err)
-	}
-	agent.K8sClient = k8sClient
-	agent.Logger.Info("kubernetes client initialized")
-
-	enricherK8sClient := agent.K8sClient
-	if !config.Agent.Enrichment.KubernetesMetadata {
-		agent.Logger.Warn("kubernetes metadata enrichment disabled", zap.Bool("kubernetes_only", config.Agent.Enrichment.KubernetesOnly))
-		if config.Agent.Enrichment.KubernetesOnly {
-			// Note: This condition should be caught by config.Validate(), but log the accuracy here for clarity.
-			agent.Logger.Warn("kubernetes_only enabled while kubernetes_metadata is disabled; all events without K8s context will be discarded")
+	// ANCHOR: Optional Kubernetes client bootstrap - Feature: monitor-only no-k8s mode - Mar 28, 2026
+	// When kubernetes_metadata is disabled, skip Kubernetes client creation entirely.
+	var k8sClient *kubernetes.Client
+	if config.Agent.Enrichment.KubernetesMetadata {
+		k8sClient, err = kubernetes.NewClient(config.Agent.Kubernetes.InCluster)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create kubernetes client: %w", err)
 		}
-		enricherK8sClient = nil
+		agent.K8sClient = k8sClient
+		agent.Logger.Info("kubernetes client initialized")
+	} else {
+		agent.K8sClient = nil
+		agent.Logger.Warn("kubernetes metadata enrichment disabled; running without Kubernetes client",
+			zap.Bool("kubernetes_only", config.Agent.Enrichment.KubernetesOnly))
 	}
 
 	// Initialize rule engine with configurable rule source
@@ -179,8 +177,11 @@ func NewAgent(config *Config) (*Agent, error) {
 		RuleFilePath:       config.Agent.Rules.FilePath,
 		ConfigMapName:      config.Agent.Rules.ConfigMap.Name,
 		ConfigMapNamespace: config.Agent.Rules.ConfigMap.Namespace,
-		K8sClientset:       k8sClient.GetClientset(), // Pass K8s client for ConfigMap API access
 		Ctx:                context.Background(),
+	}
+	if k8sClient != nil {
+		// Pass K8s client for ConfigMap rule loading when available.
+		engineConfig.K8sClientset = k8sClient.GetClientset()
 	}
 	ruleEngine, err := rules.NewEngineWithConfig(engineConfig)
 	if err != nil {
@@ -201,7 +202,7 @@ func NewAgent(config *Config) (*Agent, error) {
 	}
 
 	// Initialize enricher
-	enricher, err := enrichment.NewEnricher(enricherK8sClient, config.Agent.ClusterID, config.Agent.NodeName)
+	enricher, err := enrichment.NewEnricher(agent.K8sClient, config.Agent.ClusterID, config.Agent.NodeName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create enricher: %w", err)
 	}
