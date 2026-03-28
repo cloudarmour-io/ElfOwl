@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -23,6 +25,14 @@ type Client struct {
 	clientset *kubernetes.Clientset
 	config    *rest.Config
 	cache     *MetadataCache
+	auditMu   sync.RWMutex
+	auditMemo auditLoggingMemo
+}
+
+type auditLoggingMemo struct {
+	enabled   bool
+	checked   bool
+	checkedAt time.Time
 }
 
 // NewClient creates a new Kubernetes API client
@@ -217,11 +227,27 @@ func (c *Client) GetPodMetadata(ctx context.Context, namespace, podName string) 
 		imageSigned = signed
 	}
 	imageRegistryAuth := ImageRegistryAuthFromPod(pod, containerName, serviceAccount)
+	runtime := ContainerRuntimeFromPod(pod, containerName)
+	isolationLevel := 0
 	volumeType := ""
 	if hasContainer {
 		volumeType = VolumeTypeForContainer(pod, primaryContainer)
+		isolationLevel = IsolationLevelForContainer(pod, primaryContainer)
 	}
 	kernelHardening := KernelHardeningFromPod(pod)
+	auditLoggingEnabled, hasAuditOverride := AuditLoggingEnabledFromPod(pod)
+	if !hasAuditOverride {
+		auditLoggingEnabled = c.IsAuditLoggingEnabled(ctx)
+	}
+	var ownerRef *OwnerReference
+	if len(pod.OwnerReferences) > 0 {
+		owner := pod.OwnerReferences[0]
+		ownerRef = &OwnerReference{
+			Kind: owner.Kind,
+			Name: owner.Name,
+			UID:  string(owner.UID),
+		}
+	}
 
 	// Create PodMetadata with extracted security context
 	metadata := &PodMetadata{
@@ -233,7 +259,7 @@ func (c *Client) GetPodMetadata(ctx context.Context, namespace, podName string) 
 		ImageRegistry:            "", // Will be parsed by enricher
 		ImageTag:                 "", // Will be parsed by enricher
 		Labels:                   pod.Labels,
-		OwnerRef:                 nil, // TODO: Phase 2.3 - extract owner references from pod
+		OwnerRef:                 ownerRef,
 		ContainerName:            containerName,
 		RunAsUser:                runAsUser,
 		RunAsNonRoot:             runAsNonRoot,
@@ -255,12 +281,15 @@ func (c *Client) GetPodMetadata(ctx context.Context, namespace, podName string) 
 		ImagePullPolicy:          imagePullPolicy,
 		// ANCHOR: Compliance signal fields from pod spec - Feature: image/volume/kernel signals - Mar 22, 2026
 		// Populate CIS fields from annotations, imagePullSecrets, volumes, and sysctls.
-		ImageScanStatus:   imageScanStatus,
-		ImageRegistryAuth: imageRegistryAuth,
-		ImageSigned:       imageSigned,
-		StorageRequest:    storageRequest,
-		VolumeType:        volumeType,
-		KernelHardening:   kernelHardening,
+		ImageScanStatus:     imageScanStatus,
+		ImageRegistryAuth:   imageRegistryAuth,
+		ImageSigned:         imageSigned,
+		StorageRequest:      storageRequest,
+		VolumeType:          volumeType,
+		Runtime:             runtime,
+		IsolationLevel:      isolationLevel,
+		KernelHardening:     kernelHardening,
+		AuditLoggingEnabled: auditLoggingEnabled,
 	}
 
 	// Store in cache
@@ -356,6 +385,85 @@ func (c *Client) normalizeContainerID(containerID string) string {
 		}
 	}
 	return containerID
+}
+
+const auditLoggingCacheTTL = 5 * time.Minute
+
+// IsAuditLoggingEnabled returns best-effort cluster audit logging status.
+// ANCHOR: Audit logging status detection - Feature: CIS_5.5.1 inputs - Mar 29, 2026
+// Uses kube-apiserver pod command/args flags with short TTL caching.
+func (c *Client) IsAuditLoggingEnabled(ctx context.Context) bool {
+	if c == nil || c.clientset == nil {
+		return false
+	}
+
+	c.auditMu.RLock()
+	if c.auditMemo.checked && time.Since(c.auditMemo.checkedAt) < auditLoggingCacheTTL {
+		enabled := c.auditMemo.enabled
+		c.auditMu.RUnlock()
+		return enabled
+	}
+	c.auditMu.RUnlock()
+
+	c.auditMu.Lock()
+	defer c.auditMu.Unlock()
+
+	if c.auditMemo.checked && time.Since(c.auditMemo.checkedAt) < auditLoggingCacheTTL {
+		return c.auditMemo.enabled
+	}
+
+	enabled, ok := c.detectAuditLoggingEnabled(ctx)
+	if !ok && c.auditMemo.checked {
+		return c.auditMemo.enabled
+	}
+	c.auditMemo = auditLoggingMemo{
+		enabled:   enabled,
+		checked:   true,
+		checkedAt: time.Now(),
+	}
+	return enabled
+}
+
+func (c *Client) detectAuditLoggingEnabled(ctx context.Context) (bool, bool) {
+	pods, err := c.clientset.CoreV1().Pods("kube-system").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return false, false
+	}
+
+	for _, pod := range pods.Items {
+		if !isAPIServerPod(pod) {
+			continue
+		}
+		for _, container := range pod.Spec.Containers {
+			if hasAuditFlags(container.Command, container.Args) {
+				return true, true
+			}
+		}
+	}
+	return false, true
+}
+
+func isAPIServerPod(pod corev1.Pod) bool {
+	if strings.Contains(pod.Name, "kube-apiserver") {
+		return true
+	}
+	if pod.Labels == nil {
+		return false
+	}
+	if pod.Labels["component"] == "kube-apiserver" {
+		return true
+	}
+	if pod.Labels["k8s-app"] == "kube-apiserver" {
+		return true
+	}
+	return false
+}
+
+func hasAuditFlags(command, args []string) bool {
+	joined := strings.Join(append(append([]string{}, command...), args...), " ")
+	return strings.Contains(joined, "--audit-log-path") ||
+		strings.Contains(joined, "--audit-policy-file") ||
+		strings.Contains(joined, "--audit-webhook-config-file")
 }
 
 // GetNodeMetadata retrieves node metadata
@@ -873,11 +981,14 @@ type PodMetadata struct {
 
 	// ANCHOR: Compliance signal fields for CIS controls - Mar 22, 2026
 	// Fields populated from annotations, imagePullSecrets, volume mounts, and sysctls.
-	ImageScanStatus   string
-	ImageRegistryAuth bool
-	ImageSigned       bool
-	VolumeType        string
-	KernelHardening   bool
+	ImageScanStatus     string
+	ImageRegistryAuth   bool
+	ImageSigned         bool
+	VolumeType          string
+	Runtime             string
+	IsolationLevel      int
+	KernelHardening     bool
+	AuditLoggingEnabled bool
 }
 
 type OwnerReference struct {

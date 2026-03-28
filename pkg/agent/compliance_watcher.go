@@ -120,7 +120,7 @@ func (a *Agent) buildPodSpecEvents(ctx context.Context, pod *corev1.Pod) []*enri
 
 	events := make([]*enrichment.EnrichedEvent, 0, len(pod.Spec.Containers))
 	for _, container := range pod.Spec.Containers {
-		event := a.buildPodSpecEventForContainer(pod, container, serviceAccount)
+		event := a.buildPodSpecEventForContainer(ctx, pod, container, serviceAccount)
 		if event != nil {
 			events = append(events, event)
 		}
@@ -128,7 +128,7 @@ func (a *Agent) buildPodSpecEvents(ctx context.Context, pod *corev1.Pod) []*enri
 	return events
 }
 
-func (a *Agent) buildPodSpecEventForContainer(pod *corev1.Pod, container corev1.Container, serviceAccount *corev1.ServiceAccount) *enrichment.EnrichedEvent {
+func (a *Agent) buildPodSpecEventForContainer(ctx context.Context, pod *corev1.Pod, container corev1.Container, serviceAccount *corev1.ServiceAccount) *enrichment.EnrichedEvent {
 	if pod == nil {
 		return nil
 	}
@@ -204,10 +204,39 @@ func (a *Agent) buildPodSpecEventForContainer(pod *corev1.Pod, container corev1.
 	}
 	imageRegistryAuth := kubernetes.ImageRegistryAuthFromPod(pod, containerName, serviceAccount)
 	volumeType := kubernetes.VolumeTypeForContainer(pod, container)
+	containerRuntime := kubernetes.ContainerRuntimeFromPod(pod, containerName)
+	isolationLevel := kubernetes.IsolationLevelForContainer(pod, container)
 	kernelHardening := kubernetes.KernelHardeningFromPod(pod)
+	auditLoggingEnabled, hasAuditOverride := kubernetes.AuditLoggingEnabledFromPod(pod)
+	if !hasAuditOverride && a.K8sClient != nil {
+		auditLoggingEnabled = a.K8sClient.IsAuditLoggingEnabled(ctx)
+	}
+	k8sCtx.AuditLoggingEnabled = auditLoggingEnabled
+
+	// ANCHOR: RBAC context for pod_spec_check events - Feature: CIS 5.x completeness - Mar 29, 2026
+	// Populate service account token age and RBAC privilege/permission fields so
+	// pod_spec_check controls can evaluate with real values instead of defaults.
+	if a.K8sClient != nil && serviceAccountName != "" {
+		saMeta, err := a.K8sClient.GetServiceAccountMetadata(ctx, pod.Namespace, serviceAccountName)
+		if err == nil && saMeta != nil {
+			if pod.Spec.AutomountServiceAccountToken == nil {
+				k8sCtx.AutomountServiceAccountToken = saMeta.AutomountServiceAccountToken
+			}
+			if saMeta.TokenCreatedAt > 0 {
+				k8sCtx.ServiceAccountTokenAge = time.Now().Unix() - saMeta.TokenCreatedAt
+			}
+		}
+
+		k8sCtx.RBACLevel = a.K8sClient.GetRBACLevel(ctx, pod.Namespace, serviceAccountName)
+		k8sCtx.RBACEnforced = k8sCtx.RBACLevel >= 0
+		k8sCtx.ServiceAccountPermissions = a.K8sClient.CountRBACPermissions(ctx, pod.Namespace, serviceAccountName)
+		k8sCtx.RBACPolicyDefined = k8sCtx.ServiceAccountPermissions > 0
+		k8sCtx.RolePermissionCount = k8sCtx.ServiceAccountPermissions
+	}
 
 	containerCtx := &enrichment.ContainerContext{
 		ContainerName:            containerName,
+		Runtime:                  containerRuntime,
 		Privileged:               privileged,
 		RunAsRoot:                runAsRoot,
 		AllowPrivilegeEscalation: allowPrivilegeEscalation,
@@ -230,6 +259,7 @@ func (a *Agent) buildPodSpecEventForContainer(pod *corev1.Pod, container corev1.
 		ImageRegistryAuth: imageRegistryAuth,
 		ImageSigned:       imageSigned,
 		VolumeType:        volumeType,
+		IsolationLevel:    isolationLevel,
 		KernelHardening:   kernelHardening,
 	}
 

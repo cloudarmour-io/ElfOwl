@@ -217,6 +217,48 @@ func protocolName(proto uint64) string {
 	}
 }
 
+func networkDirectionName(direction uint64) string {
+	switch direction {
+	case 1:
+		return "outbound"
+	case 2:
+		return "inbound"
+	default:
+		return "unknown"
+	}
+}
+
+func tcpConnectionStateName(state uint64) string {
+	switch state {
+	case 1:
+		return "ESTABLISHED"
+	case 2:
+		return "SYN_SENT"
+	case 3:
+		return "SYN_RECV"
+	case 4:
+		return "FIN_WAIT1"
+	case 5:
+		return "FIN_WAIT2"
+	case 6:
+		return "TIME_WAIT"
+	case 7:
+		return "CLOSE"
+	case 8:
+		return "CLOSE_WAIT"
+	case 9:
+		return "LAST_ACK"
+	case 10:
+		return "LISTEN"
+	case 11:
+		return "CLOSING"
+	case 12:
+		return "NEW_SYN_RECV"
+	default:
+		return "UNKNOWN"
+	}
+}
+
 func fileOperationName(op uint64) string {
 	switch op {
 	case 1:
@@ -670,6 +712,8 @@ func applyPodComplianceFields(containerCtx *ContainerContext, podMeta *PodMetada
 	containerCtx.ImageSigned = podMeta.ImageSigned
 	containerCtx.StorageRequest = podMeta.StorageRequest
 	containerCtx.VolumeType = podMeta.VolumeType
+	containerCtx.Runtime = podMeta.Runtime
+	containerCtx.IsolationLevel = podMeta.IsolationLevel
 	containerCtx.KernelHardening = podMeta.KernelHardening
 }
 
@@ -734,6 +778,14 @@ func (e *Enricher) EnrichProcessEvent(
 		k8sCtx.ImageRegistry = e.parseImageRegistry(podMeta.Image)
 		k8sCtx.ImageTag = e.parseImageTag(podMeta.Image)
 		k8sCtx.Labels = podMeta.Labels
+		if podMeta.OwnerRef != nil {
+			k8sCtx.OwnerRef = &OwnerReference{
+				Kind: podMeta.OwnerRef.Kind,
+				Name: podMeta.OwnerRef.Name,
+				UID:  podMeta.OwnerRef.UID,
+			}
+		}
+		k8sCtx.AuditLoggingEnabled = podMeta.AuditLoggingEnabled
 		containerCtx.ContainerName = podMeta.ContainerName
 
 		// ANCHOR: Extract RBAC context from ServiceAccount and Role bindings - Phase 2.3, Dec 26, 2025
@@ -885,6 +937,14 @@ func (e *Enricher) EnrichNetworkEvent(
 		k8sCtx.ServiceAccount = podMeta.ServiceAccount
 		k8sCtx.Image = podMeta.Image
 		k8sCtx.Labels = podMeta.Labels
+		if podMeta.OwnerRef != nil {
+			k8sCtx.OwnerRef = &OwnerReference{
+				Kind: podMeta.OwnerRef.Kind,
+				Name: podMeta.OwnerRef.Name,
+				UID:  podMeta.OwnerRef.UID,
+			}
+		}
+		k8sCtx.AuditLoggingEnabled = podMeta.AuditLoggingEnabled
 		containerCtx.ContainerName = podMeta.ContainerName
 		// ANCHOR: Compliance fields for network events - Feature: image/volume/kernel signals - Mar 22, 2026
 		// Propagates pod-derived compliance signals into network events for rule evaluation.
@@ -900,6 +960,9 @@ func (e *Enricher) EnrichNetworkEvent(
 		SourcePort:         sourcePortVal,
 		DestinationPort:    destPortVal,
 		Protocol:           protocolVal,
+		Direction:          networkDirectionName(fieldUintValue(v, "Direction")),
+		ConnectionState:    tcpConnectionStateName(fieldUintValue(v, "State")),
+		NetworkNamespaceID: uint32(fieldUintValue(v, "NetNS")),
 		IngressRestricted:  false,
 		EgressRestricted:   false,
 		NamespaceIsolation: false,
@@ -987,6 +1050,14 @@ func (e *Enricher) EnrichDNSEvent(
 		k8sCtx.ServiceAccount = podMeta.ServiceAccount
 		k8sCtx.Image = podMeta.Image
 		k8sCtx.Labels = podMeta.Labels
+		if podMeta.OwnerRef != nil {
+			k8sCtx.OwnerRef = &OwnerReference{
+				Kind: podMeta.OwnerRef.Kind,
+				Name: podMeta.OwnerRef.Name,
+				UID:  podMeta.OwnerRef.UID,
+			}
+		}
+		k8sCtx.AuditLoggingEnabled = podMeta.AuditLoggingEnabled
 		containerCtx.ContainerName = podMeta.ContainerName
 		// ANCHOR: Compliance fields for DNS events - Feature: image/volume/kernel signals - Mar 22, 2026
 		// Propagates pod-derived compliance signals into DNS events for rule evaluation.
@@ -1066,6 +1137,14 @@ func (e *Enricher) EnrichFileEvent(
 		k8sCtx.ServiceAccount = podMeta.ServiceAccount
 		k8sCtx.Image = podMeta.Image
 		k8sCtx.Labels = podMeta.Labels
+		if podMeta.OwnerRef != nil {
+			k8sCtx.OwnerRef = &OwnerReference{
+				Kind: podMeta.OwnerRef.Kind,
+				Name: podMeta.OwnerRef.Name,
+				UID:  podMeta.OwnerRef.UID,
+			}
+		}
+		k8sCtx.AuditLoggingEnabled = podMeta.AuditLoggingEnabled
 		containerCtx.ContainerName = podMeta.ContainerName
 		// ANCHOR: Compliance fields for file events - Feature: image/volume/kernel signals - Mar 22, 2026
 		// Propagates pod-derived compliance signals into file events for rule evaluation.
@@ -1160,6 +1239,14 @@ func (e *Enricher) EnrichCapabilityEvent(
 		k8sCtx.ServiceAccount = podMeta.ServiceAccount
 		k8sCtx.Image = podMeta.Image
 		k8sCtx.Labels = podMeta.Labels
+		if podMeta.OwnerRef != nil {
+			k8sCtx.OwnerRef = &OwnerReference{
+				Kind: podMeta.OwnerRef.Kind,
+				Name: podMeta.OwnerRef.Name,
+				UID:  podMeta.OwnerRef.UID,
+			}
+		}
+		k8sCtx.AuditLoggingEnabled = podMeta.AuditLoggingEnabled
 		containerCtx.ContainerName = podMeta.ContainerName
 		// ANCHOR: Compliance fields for capability events - Feature: image/volume/kernel signals - Mar 22, 2026
 		// Propagates pod-derived compliance signals into capability events for rule evaluation.

@@ -38,8 +38,9 @@ func TestBuildPodSpecEventsMultiContainer(t *testing.T) {
 			UID:       types.UID("pod-uid"),
 			Labels:    map[string]string{"app": "web"},
 			Annotations: map[string]string{
-				"image-scan-status": "scanned",
-				"image-signed":      "true",
+				"image-scan-status":     "scanned",
+				"image-signed":          "true",
+				"audit-logging-enabled": "true",
 			},
 		},
 		Spec: corev1.PodSpec{
@@ -102,7 +103,13 @@ func TestBuildPodSpecEventsMultiContainer(t *testing.T) {
 				},
 			},
 		},
-		Status: corev1.PodStatus{Phase: corev1.PodRunning},
+		Status: corev1.PodStatus{
+			Phase: corev1.PodRunning,
+			ContainerStatuses: []corev1.ContainerStatus{
+				{Name: "c1", ContainerID: "containerd://runtime-c1"},
+				{Name: "c2", ContainerID: "containerd://runtime-c2"},
+			},
+		},
 	}
 
 	events := agent.buildPodSpecEvents(context.Background(), pod)
@@ -155,8 +162,17 @@ func TestBuildPodSpecEventsMultiContainer(t *testing.T) {
 	if c1.Container.VolumeType != "hostPath" {
 		t.Errorf("expected volume type hostPath, got %q", c1.Container.VolumeType)
 	}
+	if c1.Container.Runtime != "containerd" {
+		t.Errorf("expected runtime containerd, got %q", c1.Container.Runtime)
+	}
+	if c1.Container.IsolationLevel != 2 {
+		t.Errorf("expected isolation level 2, got %d", c1.Container.IsolationLevel)
+	}
 	if !c1.Container.KernelHardening {
 		t.Errorf("expected kernel hardening true")
+	}
+	if !c1.Kubernetes.AuditLoggingEnabled {
+		t.Errorf("expected audit logging enabled true")
 	}
 
 	c2 := byName["c2"]
@@ -180,6 +196,12 @@ func TestBuildPodSpecEventsMultiContainer(t *testing.T) {
 	}
 	if c2.Container.VolumeType != "emptyDir" {
 		t.Errorf("expected volume type emptyDir, got %q", c2.Container.VolumeType)
+	}
+	if c2.Container.Runtime != "containerd" {
+		t.Errorf("expected runtime containerd, got %q", c2.Container.Runtime)
+	}
+	if c2.Container.IsolationLevel != 0 {
+		t.Errorf("expected isolation level 0, got %d", c2.Container.IsolationLevel)
 	}
 }
 
