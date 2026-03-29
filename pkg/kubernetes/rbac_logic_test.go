@@ -90,3 +90,18 @@ func TestHasAPIGroup(t *testing.T) {
 		t.Fatalf("did not expect networking group to be present")
 	}
 }
+
+func TestMaxPermissionCount(t *testing.T) {
+	permissions := map[string]int{
+		"Role/read-only":         3,
+		"ClusterRole/admin-like": 120,
+		"Role/view":              7,
+	}
+	if got := maxPermissionCount(permissions); got != 120 {
+		t.Fatalf("expected max permissions 120, got %d", got)
+	}
+
+	if got := maxPermissionCount(map[string]int{}); got != 0 {
+		t.Fatalf("expected max permissions 0 for empty map, got %d", got)
+	}
+}

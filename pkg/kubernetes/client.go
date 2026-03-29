@@ -927,6 +927,101 @@ func (c *Client) HasRBACPolicy(ctx context.Context, namespace, saName string) bo
 	return c.CountBoundRoles(ctx, namespace, saName) > 0
 }
 
+// MaxRolePermissionCount returns the highest permission count among roles bound to a service account.
+// This is used for role granularity checks (broadest bound role), distinct from total permissions.
+func (c *Client) MaxRolePermissionCount(ctx context.Context, namespace, saName string) int {
+	if namespace == "" || saName == "" {
+		return 0
+	}
+
+	permissionByRef := make(map[string]int)
+
+	if err := c.waitForAPIBudget(ctx); err != nil {
+		return 0
+	}
+	rbs, err := c.clientset.RbacV1().RoleBindings(namespace).List(ctx, metav1.ListOptions{})
+	if err == nil {
+		for _, rb := range rbs.Items {
+			for _, subject := range rb.Subjects {
+				if !rbacSubjectMatchesServiceAccount(subject, namespace, saName) {
+					continue
+				}
+				if rb.RoleRef.Name == "" {
+					continue
+				}
+				refKey := rb.RoleRef.Kind + "/" + rb.RoleRef.Name
+				if _, exists := permissionByRef[refKey]; exists {
+					continue
+				}
+				permissionByRef[refKey] = c.roleRefPermissionCount(ctx, namespace, rb.RoleRef.Kind, rb.RoleRef.Name)
+			}
+		}
+	}
+
+	if err := c.waitForAPIBudget(ctx); err != nil {
+		return maxPermissionCount(permissionByRef)
+	}
+	crbs, err := c.clientset.RbacV1().ClusterRoleBindings().List(ctx, metav1.ListOptions{})
+	if err == nil {
+		for _, crb := range crbs.Items {
+			for _, subject := range crb.Subjects {
+				if !rbacSubjectMatchesServiceAccount(subject, namespace, saName) {
+					continue
+				}
+				if crb.RoleRef.Name == "" {
+					continue
+				}
+				refKey := crb.RoleRef.Kind + "/" + crb.RoleRef.Name
+				if _, exists := permissionByRef[refKey]; exists {
+					continue
+				}
+				permissionByRef[refKey] = c.roleRefPermissionCount(ctx, namespace, crb.RoleRef.Kind, crb.RoleRef.Name)
+			}
+		}
+	}
+
+	return maxPermissionCount(permissionByRef)
+}
+
+func (c *Client) roleRefPermissionCount(ctx context.Context, namespace, roleKind, roleName string) int {
+	if roleName == "" {
+		return 0
+	}
+
+	switch roleKind {
+	case "Role":
+		if err := c.waitForAPIBudget(ctx); err != nil {
+			return 0
+		}
+		role, err := c.clientset.RbacV1().Roles(namespace).Get(ctx, roleName, metav1.GetOptions{})
+		if err != nil {
+			return 0
+		}
+		return countPolicyRulesPermissions(role.Rules)
+	case "ClusterRole":
+		if err := c.waitForAPIBudget(ctx); err != nil {
+			return 0
+		}
+		role, err := c.clientset.RbacV1().ClusterRoles().Get(ctx, roleName, metav1.GetOptions{})
+		if err != nil {
+			return 0
+		}
+		return countPolicyRulesPermissions(role.Rules)
+	default:
+		return 0
+	}
+}
+
+func maxPermissionCount(permissionByRef map[string]int) int {
+	maxPermissions := 0
+	for _, permissions := range permissionByRef {
+		if permissions > maxPermissions {
+			maxPermissions = permissions
+		}
+	}
+	return maxPermissions
+}
+
 func rbacSubjectMatchesServiceAccount(subject rbacv1.Subject, namespace, saName string) bool {
 	if subject.Kind != "ServiceAccount" || subject.Name != saName {
 		return false

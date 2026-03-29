@@ -857,7 +857,7 @@ func (e *Enricher) EnrichProcessEvent(
 
 			// Count permission grants
 			k8sCtx.ServiceAccountPermissions = e.K8sClient.CountRBACPermissions(ctx, podMeta.Namespace, podMeta.ServiceAccount)
-			k8sCtx.RolePermissionCount = e.K8sClient.CountBoundRoles(ctx, podMeta.Namespace, podMeta.ServiceAccount)
+			k8sCtx.RolePermissionCount = e.K8sClient.MaxRolePermissionCount(ctx, podMeta.Namespace, podMeta.ServiceAccount)
 			k8sCtx.RBACPolicyDefined = e.K8sClient.HasRBACPolicy(ctx, podMeta.Namespace, podMeta.ServiceAccount)
 		}
 	}
