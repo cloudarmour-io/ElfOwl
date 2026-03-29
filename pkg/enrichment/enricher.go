@@ -860,6 +860,10 @@ func (e *Enricher) EnrichProcessEvent(
 				// Calculate token age (current time - token creation time)
 				if saMeta.TokenCreatedAt > 0 {
 					k8sCtx.ServiceAccountTokenAge = time.Now().Unix() - saMeta.TokenCreatedAt
+				} else if podMeta.ServiceAccountTokenTTLSeconds > 0 {
+					// Projected SA tokens (K8s 1.22+) are not persisted as Secrets.
+					// Use configured token lifetime as an age/lifetime surrogate signal.
+					k8sCtx.ServiceAccountTokenAge = podMeta.ServiceAccountTokenTTLSeconds
 				}
 			}
 

@@ -216,6 +216,37 @@ func AuditLoggingEnabledFromPod(pod *corev1.Pod) (bool, bool) {
 	return podBoolValue(pod, auditLoggingKey, "")
 }
 
+// ANCHOR: Projected service-account token TTL extraction - Feature: CIS_5.2.2 inputs - Mar 29, 2026
+// Returns the maximum projected token expirationSeconds found on pod volumes.
+// This provides a non-zero token lifetime signal on K8s 1.22+ where legacy SA secrets are absent.
+func ServiceAccountTokenTTLFromPod(pod *corev1.Pod) int64 {
+	if pod == nil {
+		return 0
+	}
+
+	var maxTTL int64
+	for _, volume := range pod.Spec.Volumes {
+		if volume.Projected == nil {
+			continue
+		}
+		for _, source := range volume.Projected.Sources {
+			if source.ServiceAccountToken == nil {
+				continue
+			}
+			// Kubernetes defaults projected token expiration to 3600 seconds when unset.
+			ttl := int64(3600)
+			if source.ServiceAccountToken.ExpirationSeconds != nil && *source.ServiceAccountToken.ExpirationSeconds > 0 {
+				ttl = *source.ServiceAccountToken.ExpirationSeconds
+			}
+			if ttl > maxTTL {
+				maxTTL = ttl
+			}
+		}
+	}
+
+	return maxTTL
+}
+
 // ANCHOR: Annotation/label lookup helper - Utility: container-scoped keys - Mar 22, 2026
 // Checks annotations/labels for base and container-qualified keys.
 func podStringValue(pod *corev1.Pod, baseKey, containerName string) (string, bool) {

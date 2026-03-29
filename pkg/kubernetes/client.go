@@ -263,6 +263,7 @@ func (c *Client) getPodMetadata(ctx context.Context, namespace, podName, contain
 	}
 	imageRegistryAuth := ImageRegistryAuthFromPod(pod, selectedContainerName, serviceAccount)
 	runtime := ContainerRuntimeFromPod(pod, selectedContainerName)
+	tokenTTL := ServiceAccountTokenTTLFromPod(pod)
 	isolationLevel := 0
 	volumeType := ""
 	if hasSelectedContainer {
@@ -316,15 +317,16 @@ func (c *Client) getPodMetadata(ctx context.Context, namespace, podName, contain
 		ImagePullPolicy:          imagePullPolicy,
 		// ANCHOR: Compliance signal fields from pod spec - Feature: image/volume/kernel signals - Mar 22, 2026
 		// Populate CIS fields from annotations, imagePullSecrets, volumes, and sysctls.
-		ImageScanStatus:     imageScanStatus,
-		ImageRegistryAuth:   imageRegistryAuth,
-		ImageSigned:         imageSigned,
-		StorageRequest:      storageRequest,
-		VolumeType:          volumeType,
-		Runtime:             runtime,
-		IsolationLevel:      isolationLevel,
-		KernelHardening:     kernelHardening,
-		AuditLoggingEnabled: auditLoggingEnabled,
+		ImageScanStatus:               imageScanStatus,
+		ImageRegistryAuth:             imageRegistryAuth,
+		ImageSigned:                   imageSigned,
+		StorageRequest:                storageRequest,
+		VolumeType:                    volumeType,
+		Runtime:                       runtime,
+		ServiceAccountTokenTTLSeconds: tokenTTL,
+		IsolationLevel:                isolationLevel,
+		KernelHardening:               kernelHardening,
+		AuditLoggingEnabled:           auditLoggingEnabled,
 	}
 
 	// Store in cache
@@ -1141,14 +1143,15 @@ type PodMetadata struct {
 
 	// ANCHOR: Compliance signal fields for CIS controls - Mar 22, 2026
 	// Fields populated from annotations, imagePullSecrets, volume mounts, and sysctls.
-	ImageScanStatus     string
-	ImageRegistryAuth   bool
-	ImageSigned         bool
-	VolumeType          string
-	Runtime             string
-	IsolationLevel      int
-	KernelHardening     bool
-	AuditLoggingEnabled bool
+	ImageScanStatus               string
+	ImageRegistryAuth             bool
+	ImageSigned                   bool
+	VolumeType                    string
+	Runtime                       string
+	ServiceAccountTokenTTLSeconds int64
+	IsolationLevel                int
+	KernelHardening               bool
+	AuditLoggingEnabled           bool
 }
 
 type OwnerReference struct {

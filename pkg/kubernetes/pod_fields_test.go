@@ -71,3 +71,31 @@ func TestAuditLoggingEnabledFromPod(t *testing.T) {
 		t.Fatalf("expected audit logging override true, got enabled=%v ok=%v", enabled, ok)
 	}
 }
+
+func TestServiceAccountTokenTTLFromPod(t *testing.T) {
+	ttl := int64(1800)
+	pod := &corev1.Pod{
+		Spec: corev1.PodSpec{
+			Volumes: []corev1.Volume{
+				{
+					Name: "token-vol",
+					VolumeSource: corev1.VolumeSource{
+						Projected: &corev1.ProjectedVolumeSource{
+							Sources: []corev1.VolumeProjection{
+								{
+									ServiceAccountToken: &corev1.ServiceAccountTokenProjection{
+										ExpirationSeconds: &ttl,
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	if got := ServiceAccountTokenTTLFromPod(pod); got != ttl {
+		t.Fatalf("expected token ttl %d, got %d", ttl, got)
+	}
+}

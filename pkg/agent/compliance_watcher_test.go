@@ -30,6 +30,7 @@ func TestBuildPodSpecEventsMultiContainer(t *testing.T) {
 	priv := true
 	allowEsc := false
 	readOnly := true
+	tokenTTL := int64(1800)
 
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -65,6 +66,20 @@ func TestBuildPodSpecEventsMultiContainer(t *testing.T) {
 					Name: "scratch-vol",
 					VolumeSource: corev1.VolumeSource{
 						EmptyDir: &corev1.EmptyDirVolumeSource{},
+					},
+				},
+				{
+					Name: "token-vol",
+					VolumeSource: corev1.VolumeSource{
+						Projected: &corev1.ProjectedVolumeSource{
+							Sources: []corev1.VolumeProjection{
+								{
+									ServiceAccountToken: &corev1.ServiceAccountTokenProjection{
+										ExpirationSeconds: &tokenTTL,
+									},
+								},
+							},
+						},
 					},
 				},
 			},
@@ -174,6 +189,9 @@ func TestBuildPodSpecEventsMultiContainer(t *testing.T) {
 	if !c1.Kubernetes.AuditLoggingEnabled {
 		t.Errorf("expected audit logging enabled true")
 	}
+	if c1.Kubernetes.ServiceAccountTokenAge != tokenTTL {
+		t.Errorf("expected token age fallback %d, got %d", tokenTTL, c1.Kubernetes.ServiceAccountTokenAge)
+	}
 
 	c2 := byName["c2"]
 	if c2 == nil {
@@ -202,6 +220,9 @@ func TestBuildPodSpecEventsMultiContainer(t *testing.T) {
 	}
 	if c2.Container.IsolationLevel != 0 {
 		t.Errorf("expected isolation level 0, got %d", c2.Container.IsolationLevel)
+	}
+	if c2.Kubernetes.ServiceAccountTokenAge != tokenTTL {
+		t.Errorf("expected token age fallback %d, got %d", tokenTTL, c2.Kubernetes.ServiceAccountTokenAge)
 	}
 }
 

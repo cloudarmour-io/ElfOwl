@@ -187,6 +187,9 @@ func (a *Agent) buildPodSpecEventForContainer(ctx context.Context, pod *corev1.P
 	if pod.Spec.AutomountServiceAccountToken != nil {
 		k8sCtx.AutomountServiceAccountToken = *pod.Spec.AutomountServiceAccountToken
 	}
+	if tokenTTL := kubernetes.ServiceAccountTokenTTLFromPod(pod); tokenTTL > 0 {
+		k8sCtx.ServiceAccountTokenAge = tokenTTL
+	}
 
 	if len(pod.OwnerReferences) > 0 {
 		owner := pod.OwnerReferences[0]
