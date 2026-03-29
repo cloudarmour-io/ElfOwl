@@ -62,3 +62,5 @@ pkg/ebpf/programs/vmlinux.h
 .owl-agent-src.tgz
 
 .gocache/
+
+*REVIEW.md
