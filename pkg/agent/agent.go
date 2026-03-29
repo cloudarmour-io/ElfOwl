@@ -96,12 +96,6 @@ type HealthStatus struct {
 	Status           string          `json:"status"`
 }
 
-// ANCHOR: Monitor bootstrapping fallback - Phase 3.5 Week 4
-// Provides placeholder ProgramSet instances until bytecode loading is available.
-func newMonitorProgramSet() *ebpf.ProgramSet {
-	return &ebpf.ProgramSet{}
-}
-
 // NewAgent creates a new agent instance with all components
 func NewAgent(config *Config) (*Agent, error) {
 	// Initialize logger
@@ -119,39 +113,9 @@ func NewAgent(config *Config) (*Agent, error) {
 		startTime:       time.Now(),
 	}
 
-	// ANCHOR: Initialize cilium/ebpf monitors if enabled - Dec 27, 2025
-	// Create monitor with nil ProgramSet (will be loaded by Start())
-	if config.Agent.EBPF.Enabled {
-		if config.Agent.EBPF.Process.Enabled {
-			processMonitor := ebpf.NewProcessMonitor(newMonitorProgramSet(), agent.Logger)
-			agent.ProcessMonitor = processMonitor
-			agent.Logger.Info("process monitor initialized")
-		}
-
-		if config.Agent.EBPF.Network.Enabled {
-			networkMonitor := ebpf.NewNetworkMonitor(newMonitorProgramSet(), agent.Logger)
-			agent.NetworkMonitor = networkMonitor
-			agent.Logger.Info("network monitor initialized")
-		}
-
-		if config.Agent.EBPF.DNS.Enabled {
-			dnsMonitor := ebpf.NewDNSMonitor(newMonitorProgramSet(), agent.Logger)
-			agent.DNSMonitor = dnsMonitor
-			agent.Logger.Info("DNS monitor initialized")
-		}
-
-		if config.Agent.EBPF.File.Enabled {
-			fileMonitor := ebpf.NewFileMonitor(newMonitorProgramSet(), agent.Logger)
-			agent.FileMonitor = fileMonitor
-			agent.Logger.Info("file monitor initialized")
-		}
-
-		if config.Agent.EBPF.Capability.Enabled {
-			capMonitor := ebpf.NewCapabilityMonitor(newMonitorProgramSet(), agent.Logger)
-			agent.CapabilityMonitor = capMonitor
-			agent.Logger.Info("capability monitor initialized")
-		}
-	}
+	// ANCHOR: Defer monitor creation to Start() - Fix: placeholder ProgramSet lifecycle fragility - Mar 29, 2026
+	// Monitor instances are now created only after LoadProgramsWithOptions succeeds so
+	// partially initialized placeholder monitors are not kept on the agent instance.
 
 	// ANCHOR: Optional Kubernetes client bootstrap - Feature: monitor-only no-k8s mode - Mar 28, 2026
 	// When kubernetes_metadata is disabled, skip Kubernetes client creation entirely.

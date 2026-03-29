@@ -482,11 +482,15 @@ func (e *Enricher) resolvePodMetadataFromCgroupMapping(ctx context.Context, cgro
 	if !found || mapping == "" {
 		return nil, nil
 	}
-	parts := strings.Split(mapping, "/")
-	if len(parts) != 2 {
+	parts := strings.SplitN(mapping, "/", 3)
+	if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
 		return nil, nil
 	}
-	metadata, err := e.K8sClient.GetPodMetadata(ctx, parts[0], parts[1])
+	containerName := ""
+	if len(parts) == 3 {
+		containerName = parts[2]
+	}
+	metadata, err := e.K8sClient.GetPodMetadataForContainer(ctx, parts[0], parts[1], containerName)
 	if err != nil {
 		return nil, err
 	}
@@ -517,7 +521,7 @@ func (e *Enricher) refreshCgroupPodMappings(ctx context.Context, force bool) {
 		return
 	}
 
-	for mapping, podMeta := range pods {
+	for baseMapping, podMeta := range pods {
 		if podMeta == nil {
 			continue
 		}
@@ -542,6 +546,13 @@ func (e *Enricher) refreshCgroupPodMappings(ctx context.Context, force bool) {
 			e.cgroupToContainerMutex.Lock()
 			e.cgroupToContainerCache[cgroupID] = containerID
 			e.cgroupToContainerMutex.Unlock()
+
+			mapping := baseMapping
+			if podMeta.ContainerIDToName != nil {
+				if containerName, ok := podMeta.ContainerIDToName[containerID]; ok && containerName != "" {
+					mapping = fmt.Sprintf("%s/%s/%s", podMeta.Namespace, podMeta.Name, containerName)
+				}
+			}
 
 			e.containerToPodMutex.Lock()
 			e.containerToPodCache[containerID] = mapping
@@ -629,11 +640,34 @@ func (e *Enricher) getPodMetadata(ctx context.Context, containerID string, cgrou
 	e.containerToPodMutex.RUnlock()
 
 	if found {
-		// Parse cached mapping: "namespace/podname"
-		parts := strings.Split(cachedMapping, "/")
-		if len(parts) == 2 {
-			// Use K8s client to retrieve the pod metadata with its cache
-			metadata, err := e.K8sClient.GetPodMetadata(ctx, parts[0], parts[1])
+		// Parse cached mapping: "namespace/podname[/container]"
+		parts := strings.SplitN(cachedMapping, "/", 3)
+		if len(parts) >= 2 {
+			namespace := parts[0]
+			podName := parts[1]
+			containerName := ""
+			if len(parts) == 3 {
+				containerName = parts[2]
+			}
+
+			if containerName == "" {
+				// Backward-compatible path for old cache entries that only stored namespace/pod.
+				// Resolve again via container ID to recover the specific container context.
+				metadata, err := e.K8sClient.GetPodByContainerID(ctx, containerID)
+				if err == nil && metadata != nil {
+					mapping := fmt.Sprintf("%s/%s", metadata.Namespace, metadata.Name)
+					if metadata.ContainerName != "" {
+						mapping = fmt.Sprintf("%s/%s/%s", metadata.Namespace, metadata.Name, metadata.ContainerName)
+					}
+					e.containerToPodMutex.Lock()
+					e.containerToPodCache[containerID] = mapping
+					e.containerToPodMutex.Unlock()
+					return metadata, nil
+				}
+			}
+
+			// Use K8s client to retrieve pod metadata with container-specific context.
+			metadata, err := e.K8sClient.GetPodMetadataForContainer(ctx, namespace, podName, containerName)
 			if err != nil {
 				e.Logger.Debug("failed to get pod metadata from cache", zap.Error(err))
 				return nil, err
@@ -652,6 +686,9 @@ func (e *Enricher) getPodMetadata(ctx context.Context, containerID string, cgrou
 	if metadata != nil {
 		// Cache the mapping locally for future use
 		mapping := fmt.Sprintf("%s/%s", metadata.Namespace, metadata.Name)
+		if metadata.ContainerName != "" {
+			mapping = fmt.Sprintf("%s/%s/%s", metadata.Namespace, metadata.Name, metadata.ContainerName)
+		}
 		e.containerToPodMutex.Lock()
 		e.containerToPodCache[containerID] = mapping
 		e.containerToPodMutex.Unlock()

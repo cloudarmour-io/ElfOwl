@@ -87,12 +87,28 @@ func (c *Client) GetCache() *MetadataCache {
 // ANCHOR: Pod metadata query from K8s API - Phase 2.2, Dec 26, 2025
 // Retrieves pod name, namespace, UID, service account, image, and labels
 func (c *Client) GetPodMetadata(ctx context.Context, namespace, podName string) (*PodMetadata, error) {
+	return c.getPodMetadata(ctx, namespace, podName, "")
+}
+
+// GetPodMetadataForContainer retrieves pod metadata using a specific container identity.
+// ANCHOR: Container-specific metadata extraction - Fix: multi-container context bleed - Mar 29, 2026
+// Uses the provided container name to extract security/resource/runtime fields from the
+// correct container instead of always using pod.Spec.Containers[0].
+func (c *Client) GetPodMetadataForContainer(ctx context.Context, namespace, podName, containerName string) (*PodMetadata, error) {
+	return c.getPodMetadata(ctx, namespace, podName, containerName)
+}
+
+func (c *Client) getPodMetadata(ctx context.Context, namespace, podName, containerName string) (*PodMetadata, error) {
 	if namespace == "" || podName == "" {
 		return nil, fmt.Errorf("namespace and pod name required")
 	}
 
 	// Check cache first
-	if cached, found := c.cache.GetPod(namespace, podName); found {
+	cacheKey := podName
+	if containerName != "" {
+		cacheKey = podName + "#" + containerName
+	}
+	if cached, found := c.cache.GetPod(namespace, cacheKey); found {
 		return cached, nil
 	}
 
@@ -102,13 +118,33 @@ func (c *Client) GetPodMetadata(ctx context.Context, namespace, podName string) 
 		return nil, fmt.Errorf("failed to get pod %s/%s: %w", namespace, podName, err)
 	}
 
-	// Extract metadata from pod spec
+	// Select container-specific fields from the matched container when available.
+	selectedContainer := corev1.Container{}
+	selectedContainerName := containerName
+	hasSelectedContainer := false
+	if containerName != "" {
+		for _, container := range pod.Spec.Containers {
+			if container.Name == containerName {
+				selectedContainer = container
+				selectedContainerName = container.Name
+				hasSelectedContainer = true
+				break
+			}
+		}
+	}
+	if !hasSelectedContainer && len(pod.Spec.Containers) > 0 {
+		selectedContainer = pod.Spec.Containers[0]
+		selectedContainerName = selectedContainer.Name
+		hasSelectedContainer = true
+	}
+
+	// Extract metadata from selected pod container.
 	image := ""
 	imagePullPolicy := "IfNotPresent"
-	if len(pod.Spec.Containers) > 0 {
-		image = pod.Spec.Containers[0].Image
-		if pod.Spec.Containers[0].ImagePullPolicy != "" {
-			imagePullPolicy = string(pod.Spec.Containers[0].ImagePullPolicy)
+	if hasSelectedContainer {
+		image = selectedContainer.Image
+		if selectedContainer.ImagePullPolicy != "" {
+			imagePullPolicy = string(selectedContainer.ImagePullPolicy)
 		}
 	}
 
@@ -142,27 +178,18 @@ func (c *Client) GetPodMetadata(ctx context.Context, namespace, podName string) 
 		}
 	}
 
-	containerName := ""
-
 	// AppArmor profile from pod annotations
 	// ANCHOR: Extract AppArmor profile with container name in annotation key - Phase 2.2 fix, Dec 26, 2025
 	// K8s annotation key includes container name suffix, e.g. container.apparmor.security.beta.kubernetes.io/{container_name}
-	if pod.Annotations != nil && len(pod.Spec.Containers) > 0 {
-		containerName = pod.Spec.Containers[0].Name
-		apparmorProfile = pod.Annotations["container.apparmor.security.beta.kubernetes.io/"+containerName]
+	if pod.Annotations != nil && selectedContainerName != "" {
+		apparmorProfile = pod.Annotations["container.apparmor.security.beta.kubernetes.io/"+selectedContainerName]
 	}
 
-	// Container-level security context (from first container)
+	// Container-level security context (from selected container)
 	// ANCHOR: Extract container-level RunAsNonRoot to override pod-level setting - Phase 2.2 fix, Dec 26, 2025
 	// Container-level security context takes precedence over pod-level for runAsNonRoot
-	primaryContainer := corev1.Container{}
-	hasContainer := false
-
-	if len(pod.Spec.Containers) > 0 {
-		container := pod.Spec.Containers[0]
-		primaryContainer = container
-		hasContainer = true
-		containerName = container.Name
+	if hasSelectedContainer {
+		container := selectedContainer
 		if container.SecurityContext != nil {
 			if container.SecurityContext.AllowPrivilegeEscalation != nil {
 				allowPrivilegeEscalation = *container.SecurityContext.AllowPrivilegeEscalation
@@ -221,18 +248,18 @@ func (c *Client) GetPodMetadata(ctx context.Context, namespace, podName string) 
 		}
 	}
 
-	imageScanStatus := ImageScanStatusFromPod(pod, containerName)
+	imageScanStatus := ImageScanStatusFromPod(pod, selectedContainerName)
 	imageSigned := false
-	if signed, ok := ImageSignedFromPod(pod, containerName); ok {
+	if signed, ok := ImageSignedFromPod(pod, selectedContainerName); ok {
 		imageSigned = signed
 	}
-	imageRegistryAuth := ImageRegistryAuthFromPod(pod, containerName, serviceAccount)
-	runtime := ContainerRuntimeFromPod(pod, containerName)
+	imageRegistryAuth := ImageRegistryAuthFromPod(pod, selectedContainerName, serviceAccount)
+	runtime := ContainerRuntimeFromPod(pod, selectedContainerName)
 	isolationLevel := 0
 	volumeType := ""
-	if hasContainer {
-		volumeType = VolumeTypeForContainer(pod, primaryContainer)
-		isolationLevel = IsolationLevelForContainer(pod, primaryContainer)
+	if hasSelectedContainer {
+		volumeType = VolumeTypeForContainer(pod, selectedContainer)
+		isolationLevel = IsolationLevelForContainer(pod, selectedContainer)
 	}
 	kernelHardening := KernelHardeningFromPod(pod)
 	auditLoggingEnabled, hasAuditOverride := AuditLoggingEnabledFromPod(pod)
@@ -260,7 +287,7 @@ func (c *Client) GetPodMetadata(ctx context.Context, namespace, podName string) 
 		ImageTag:                 "", // Will be parsed by enricher
 		Labels:                   pod.Labels,
 		OwnerRef:                 ownerRef,
-		ContainerName:            containerName,
+		ContainerName:            selectedContainerName,
 		RunAsUser:                runAsUser,
 		RunAsNonRoot:             runAsNonRoot,
 		FSGroup:                  fsGroup,
@@ -293,7 +320,7 @@ func (c *Client) GetPodMetadata(ctx context.Context, namespace, podName string) 
 	}
 
 	// Store in cache
-	c.cache.SetPod(namespace, podName, metadata)
+	c.cache.SetPod(namespace, cacheKey, metadata)
 
 	return metadata, nil
 }
@@ -308,9 +335,9 @@ func (c *Client) GetPodByContainerID(ctx context.Context, containerID string) (*
 
 	// Check mapping cache first - avoid K8s API query if we have cached mapping
 	if mapping, found := c.cache.GetContainerMapping(containerID); found {
-		parts := strings.Split(mapping, "/")
-		if len(parts) == 2 {
-			return c.GetPodMetadata(ctx, parts[0], parts[1])
+		namespace, podName, containerName, ok := parseNamespacedPodContainerMapping(mapping)
+		if ok {
+			return c.GetPodMetadataForContainer(ctx, namespace, podName, containerName)
 		}
 	}
 
@@ -333,13 +360,12 @@ func (c *Client) GetPodByContainerID(ctx context.Context, containerID string) (*
 	if err == nil {
 		// Search agent namespace first
 		for _, pod := range pods.Items {
-			for _, cs := range pod.Status.ContainerStatuses {
-				if c.normalizeContainerID(cs.ContainerID) == normalizedID {
-					// Found matching pod, cache the mapping
-					mapping := fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)
-					c.cache.SetContainerMapping(containerID, mapping)
-					return c.GetPodMetadata(ctx, pod.Namespace, pod.Name)
-				}
+			matchedContainer, found := findContainerNameForID(c, pod, normalizedID)
+			if found {
+				// Found matching pod, cache the mapping (with container identity when available)
+				mapping := formatNamespacedPodContainerMapping(pod.Namespace, pod.Name, matchedContainer)
+				c.cache.SetContainerMapping(containerID, mapping)
+				return c.GetPodMetadataForContainer(ctx, pod.Namespace, pod.Name, matchedContainer)
 			}
 		}
 	}
@@ -359,15 +385,14 @@ func (c *Client) GetPodByContainerID(ctx context.Context, containerID string) (*
 
 	// Search for matching container ID across all pods
 	for _, pod := range allPods.Items {
-		for _, cs := range pod.Status.ContainerStatuses {
-			if c.normalizeContainerID(cs.ContainerID) == normalizedID {
-				// Found matching pod, cache the mapping
-				mapping := fmt.Sprintf("%s/%s", pod.Namespace, pod.Name)
-				c.cache.SetContainerMapping(containerID, mapping)
+		matchedContainer, found := findContainerNameForID(c, pod, normalizedID)
+		if found {
+			// Found matching pod, cache the mapping
+			mapping := formatNamespacedPodContainerMapping(pod.Namespace, pod.Name, matchedContainer)
+			c.cache.SetContainerMapping(containerID, mapping)
 
-				// Query full metadata and return
-				return c.GetPodMetadata(ctx, pod.Namespace, pod.Name)
-			}
+			// Query full metadata and return
+			return c.GetPodMetadataForContainer(ctx, pod.Namespace, pod.Name, matchedContainer)
 		}
 	}
 
@@ -385,6 +410,44 @@ func (c *Client) normalizeContainerID(containerID string) string {
 		}
 	}
 	return containerID
+}
+
+func formatNamespacedPodContainerMapping(namespace, podName, containerName string) string {
+	if containerName == "" {
+		return fmt.Sprintf("%s/%s", namespace, podName)
+	}
+	return fmt.Sprintf("%s/%s/%s", namespace, podName, containerName)
+}
+
+func parseNamespacedPodContainerMapping(mapping string) (namespace, podName, containerName string, ok bool) {
+	parts := strings.SplitN(mapping, "/", 3)
+	if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
+		return "", "", "", false
+	}
+	container := ""
+	if len(parts) == 3 {
+		container = parts[2]
+	}
+	return parts[0], parts[1], container, true
+}
+
+func findContainerNameForID(c *Client, pod corev1.Pod, normalizedID string) (string, bool) {
+	for _, status := range pod.Status.ContainerStatuses {
+		if c.normalizeContainerID(status.ContainerID) == normalizedID {
+			return status.Name, true
+		}
+	}
+	for _, status := range pod.Status.InitContainerStatuses {
+		if c.normalizeContainerID(status.ContainerID) == normalizedID {
+			return status.Name, true
+		}
+	}
+	for _, status := range pod.Status.EphemeralContainerStatuses {
+		if c.normalizeContainerID(status.ContainerID) == normalizedID {
+			return status.Name, true
+		}
+	}
+	return "", false
 }
 
 const auditLoggingCacheTTL = 5 * time.Minute
@@ -853,11 +916,12 @@ func (c *Client) ListAllPods(ctx context.Context) (map[string]*PodMetadata, erro
 	for _, pod := range podList.Items {
 		// Extract metadata for each pod
 		podMeta := &PodMetadata{
-			Name:           pod.Name,
-			Namespace:      pod.Namespace,
-			UID:            string(pod.UID),
-			ServiceAccount: pod.Spec.ServiceAccountName,
-			Labels:         pod.Labels,
+			Name:              pod.Name,
+			Namespace:         pod.Namespace,
+			UID:               string(pod.UID),
+			ServiceAccount:    pod.Spec.ServiceAccountName,
+			Labels:            pod.Labels,
+			ContainerIDToName: make(map[string]string),
 		}
 
 		// ANCHOR: All-container ID extraction for multi-container mapping - Fix PR-23 #6 - Mar 26, 2026
@@ -873,6 +937,7 @@ func (c *Client) ListAllPods(ctx context.Context) (map[string]*PodMetadata, erro
 				id = parts[1]
 			}
 			podMeta.ContainerIDs = append(podMeta.ContainerIDs, id)
+			podMeta.ContainerIDToName[id] = cs.Name
 		}
 		for _, cs := range pod.Status.InitContainerStatuses {
 			if cs.ContainerID == "" {
@@ -884,6 +949,7 @@ func (c *Client) ListAllPods(ctx context.Context) (map[string]*PodMetadata, erro
 				id = parts[1]
 			}
 			podMeta.ContainerIDs = append(podMeta.ContainerIDs, id)
+			podMeta.ContainerIDToName[id] = cs.Name
 		}
 		for _, cs := range pod.Status.EphemeralContainerStatuses {
 			if cs.ContainerID == "" {
@@ -895,6 +961,7 @@ func (c *Client) ListAllPods(ctx context.Context) (map[string]*PodMetadata, erro
 				id = parts[1]
 			}
 			podMeta.ContainerIDs = append(podMeta.ContainerIDs, id)
+			podMeta.ContainerIDToName[id] = cs.Name
 		}
 
 		// Keep ContainerID/ContainerName/Image from first main container for backward compat
@@ -947,6 +1014,8 @@ type PodMetadata struct {
 	// Includes IDs from ContainerStatuses, InitContainerStatuses, EphemeralContainerStatuses.
 	// Used by refreshCgroupPodMappings to register cgroup mappings for all containers.
 	ContainerIDs []string
+	// ContainerIDToName maps normalized container IDs to container names in this pod.
+	ContainerIDToName map[string]string
 
 	// ANCHOR: Security context fields extracted from pod spec - Phase 2.2 fix, Dec 26, 2025
 	// These fields are populated by extracting values from pod.Spec security context
@@ -960,7 +1029,7 @@ type PodMetadata struct {
 	SELinuxLevel    string
 	AppArmorProfile string
 
-	// Container-level security context (from first container)
+	// Container-level security context (from selected/matched container)
 	AllowPrivilegeEscalation bool
 	Privileged               bool
 	ReadOnlyRootFilesystem   bool
@@ -969,14 +1038,14 @@ type PodMetadata struct {
 	HostIPC                  bool
 	HostPID                  bool
 
-	// Resource requests and limits (from first container)
+	// Resource requests and limits (from selected/matched container)
 	MemoryLimit    string
 	MemoryRequest  string
 	CPULimit       string
 	CPURequest     string
 	StorageRequest string
 
-	// Image pull policy (from first container)
+	// Image pull policy (from selected/matched container)
 	ImagePullPolicy string
 
 	// ANCHOR: Compliance signal fields for CIS controls - Mar 22, 2026
