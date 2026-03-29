@@ -283,6 +283,21 @@ func TestConditionEvaluation(t *testing.T) {
 			expected: true,
 		},
 		{
+			name: "Equals operator - numeric normalization",
+			event: &enrichment.EnrichedEvent{
+				EventType: "process_execution",
+				Process: &enrichment.ProcessContext{
+					UID: 0,
+				},
+			},
+			condition: Condition{
+				Field:    "process.uid",
+				Operator: "equals",
+				Value:    int64(0),
+			},
+			expected: true,
+		},
+		{
 			name: "Equals operator - false match",
 			event: &enrichment.EnrichedEvent{
 				EventType: "process_execution",
@@ -474,6 +489,51 @@ func TestConditionEvaluation(t *testing.T) {
 				Field:    "file.path",
 				Operator: "contains",
 				Value:    "etc",
+			},
+			expected: false,
+		},
+		{
+			name: "Regex operator - true match",
+			event: &enrichment.EnrichedEvent{
+				EventType: "file_write",
+				File: &enrichment.FileContext{
+					Path: "/etc/passwd",
+				},
+			},
+			condition: Condition{
+				Field:    "file.path",
+				Operator: "regex",
+				Value:    "^/etc/.*$",
+			},
+			expected: true,
+		},
+		{
+			name: "Regex operator - false match",
+			event: &enrichment.EnrichedEvent{
+				EventType: "file_write",
+				File: &enrichment.FileContext{
+					Path: "/var/log/syslog",
+				},
+			},
+			condition: Condition{
+				Field:    "file.path",
+				Operator: "regex",
+				Value:    "^/etc/.*$",
+			},
+			expected: false,
+		},
+		{
+			name: "Regex operator - invalid pattern",
+			event: &enrichment.EnrichedEvent{
+				EventType: "file_write",
+				File: &enrichment.FileContext{
+					Path: "/etc/passwd",
+				},
+			},
+			condition: Condition{
+				Field:    "file.path",
+				Operator: "regex",
+				Value:    "[invalid",
 			},
 			expected: false,
 		},
