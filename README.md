@@ -180,6 +180,7 @@ Search order at runtime:
 - `OWL_K8S_IN_CLUSTER`
 - `OWL_KUBERNETES_ONLY`
 - `OWL_KUBERNETES_METADATA`
+- `AGENT_NAMESPACE` (pod lookup fast path namespace; Helm injects this from `metadata.namespace`)
 - `ELF_OWL_SIGNING_KEY`
 - `ELF_OWL_ENCRYPTION_KEY`
 - `KUBECONFIG` (out-of-cluster Kubernetes mode)

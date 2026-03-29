@@ -49,6 +49,8 @@ agent:
     in_cluster: true
     metadata_cache_ttl: 300s
     watch_interval: 30s
+    # Container->pod lookup first queries AGENT_NAMESPACE (env) before cluster-wide fallback.
+    # In Kubernetes, set AGENT_NAMESPACE from pod metadata.namespace (Helm template does this).
 
   # Rule engine configuration
   rules:
