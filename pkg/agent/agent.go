@@ -8,10 +8,14 @@ package agent
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -69,6 +73,7 @@ type Agent struct {
 	Cipher      *evidence.Cipher
 	APIClient   *api.Client
 	EventBuffer *evidence.Buffer
+	ruleMu      sync.RWMutex
 
 	// Metrics
 	MetricsRegistry MetricsRecorder
@@ -153,7 +158,7 @@ func NewAgent(config *Config) (*Agent, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to create rule engine: %w", err)
 	}
-	agent.RuleEngine = ruleEngine
+	agent.setRuleEngine(ruleEngine)
 
 	// Log which rule source was used
 	if config.Agent.Rules.FilePath != "" {
@@ -362,6 +367,7 @@ func (a *Agent) Start(ctx context.Context) error {
 	if a.K8sClient != nil {
 		go a.startComplianceWatchers(ctx)
 	}
+	go a.watchRuleUpdates(ctx)
 
 	// ANCHOR: Respect owl_api.push.enabled - Bugfix: prevent unintended push loop - Mar 22, 2026
 	// Only start the push goroutine when explicitly enabled in config.
@@ -424,7 +430,11 @@ func (a *Agent) handleRuntimeEvent(
 		}
 	}
 
-	violations := a.RuleEngine.Match(enrichedEvent)
+	ruleEngine := a.getRuleEngine()
+	if ruleEngine == nil {
+		return
+	}
+	violations := ruleEngine.Match(enrichedEvent)
 	if len(violations) > 0 {
 		a.metricsMutex.Lock()
 		a.violationsFound += int64(len(violations))
@@ -656,7 +666,11 @@ func (a *Agent) handleComplianceEvent(ctx context.Context, event *enrichment.Enr
 		return
 	}
 
-	violations := a.RuleEngine.Match(event)
+	ruleEngine := a.getRuleEngine()
+	if ruleEngine == nil {
+		return
+	}
+	violations := ruleEngine.Match(event)
 	if len(violations) > 0 {
 		a.metricsMutex.Lock()
 		a.violationsFound += int64(len(violations))
@@ -745,6 +759,91 @@ func (a *Agent) collectMetrics(ctx context.Context) {
 		case <-a.done:
 			return
 
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+const ruleReloadInterval = 30 * time.Second
+const ruleReloadTimeout = 10 * time.Second
+
+func (a *Agent) getRuleEngine() *rules.Engine {
+	a.ruleMu.RLock()
+	defer a.ruleMu.RUnlock()
+	return a.RuleEngine
+}
+
+func (a *Agent) setRuleEngine(engine *rules.Engine) {
+	a.ruleMu.Lock()
+	defer a.ruleMu.Unlock()
+	a.RuleEngine = engine
+}
+
+func ruleEngineSignature(engine *rules.Engine) string {
+	if engine == nil {
+		return ""
+	}
+	payload, err := json.Marshal(engine.Rules)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(payload)
+	return hex.EncodeToString(sum[:])
+}
+
+func (a *Agent) ruleEngineConfig(ctx context.Context) *rules.EngineConfig {
+	cfg := &rules.EngineConfig{
+		RuleFilePath:       a.Config.Agent.Rules.FilePath,
+		ConfigMapName:      a.Config.Agent.Rules.ConfigMap.Name,
+		ConfigMapNamespace: a.Config.Agent.Rules.ConfigMap.Namespace,
+		Ctx:                ctx,
+	}
+	if a.K8sClient != nil {
+		cfg.K8sClientset = a.K8sClient.GetClientset()
+	}
+	return cfg
+}
+
+func (a *Agent) watchRuleUpdates(ctx context.Context) {
+	if a.Config == nil {
+		return
+	}
+
+	filePath := strings.TrimSpace(a.Config.Agent.Rules.FilePath)
+	configMapName := strings.TrimSpace(a.Config.Agent.Rules.ConfigMap.Name)
+	configMapNamespace := strings.TrimSpace(a.Config.Agent.Rules.ConfigMap.Namespace)
+	if filePath == "" && (configMapName == "" || configMapNamespace == "") {
+		return
+	}
+
+	ticker := time.NewTicker(ruleReloadInterval)
+	defer ticker.Stop()
+
+	currentSignature := ruleEngineSignature(a.getRuleEngine())
+
+	for {
+		select {
+		case <-ticker.C:
+			reloadCtx, cancel := context.WithTimeout(ctx, ruleReloadTimeout)
+			engine, err := rules.NewEngineWithConfig(a.ruleEngineConfig(reloadCtx))
+			cancel()
+			if err != nil {
+				a.Logger.Warn("rule reload failed", zap.Error(err))
+				continue
+			}
+
+			nextSignature := ruleEngineSignature(engine)
+			if nextSignature == "" || nextSignature == currentSignature {
+				continue
+			}
+
+			a.setRuleEngine(engine)
+			currentSignature = nextSignature
+			a.Logger.Info("rules reloaded", zap.Int("rule_count", len(engine.Rules)))
+
+		case <-a.done:
+			return
 		case <-ctx.Done():
 			return
 		}

@@ -3,6 +3,9 @@ package agent
 import (
 	"encoding/base64"
 	"testing"
+
+	"github.com/udyansh/elf-owl/pkg/rules"
+	"go.uber.org/zap"
 )
 
 func TestNewAgentDefersMonitorCreationUntilStart(t *testing.T) {
@@ -38,5 +41,29 @@ func TestGenerateEphemeralKey(t *testing.T) {
 	}
 	if len(decoded) != 32 {
 		t.Fatalf("expected 32-byte decoded key, got %d", len(decoded))
+	}
+}
+
+func TestRuleEngineSignatureChangesWithRuleSet(t *testing.T) {
+	engineA := &rules.Engine{
+		Rules: []*rules.Rule{
+			{ControlID: "A", Title: "a", Severity: "LOW"},
+		},
+		Logger: zap.NewNop(),
+	}
+	engineB := &rules.Engine{
+		Rules: []*rules.Rule{
+			{ControlID: "B", Title: "b", Severity: "LOW"},
+		},
+		Logger: zap.NewNop(),
+	}
+
+	sigA := ruleEngineSignature(engineA)
+	sigB := ruleEngineSignature(engineB)
+	if sigA == "" || sigB == "" {
+		t.Fatalf("expected non-empty signatures")
+	}
+	if sigA == sigB {
+		t.Fatalf("expected different signatures for different rule sets")
 	}
 }
