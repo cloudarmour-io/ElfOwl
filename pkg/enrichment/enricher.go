@@ -49,6 +49,25 @@ type Enricher struct {
 }
 
 const cgroupMappingRefreshInterval = 30 * time.Second
+const enrichmentK8sTimeout = 2 * time.Second
+
+func withEnrichmentTimeout(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
+	if timeout <= 0 {
+		return ctx, func() {}
+	}
+
+	if deadline, ok := ctx.Deadline(); ok {
+		if time.Until(deadline) <= timeout {
+			return ctx, func() {}
+		}
+	}
+
+	return context.WithTimeout(ctx, timeout)
+}
 
 // NewEnricher creates a new event enricher
 // ANCHOR: Enricher initialization without circular dependency - Dec 26, 2025
@@ -763,6 +782,12 @@ func (e *Enricher) EnrichProcessEvent(
 	ctx context.Context,
 	rawEvent interface{},
 ) (*EnrichedEvent, error) {
+	if e.K8sClient != nil {
+		var cancel context.CancelFunc
+		ctx, cancel = withEnrichmentTimeout(ctx, enrichmentK8sTimeout)
+		defer cancel()
+	}
+
 	if rawEvent == nil {
 		return nil, fmt.Errorf("nil process event")
 	}
@@ -934,6 +959,12 @@ func (e *Enricher) EnrichNetworkEvent(
 	ctx context.Context,
 	rawEvent interface{},
 ) (*EnrichedEvent, error) {
+	if e.K8sClient != nil {
+		var cancel context.CancelFunc
+		ctx, cancel = withEnrichmentTimeout(ctx, enrichmentK8sTimeout)
+		defer cancel()
+	}
+
 	if rawEvent == nil {
 		return nil, fmt.Errorf("nil network event")
 	}
@@ -1048,6 +1079,12 @@ func (e *Enricher) EnrichDNSEvent(
 	ctx context.Context,
 	rawEvent interface{},
 ) (*EnrichedEvent, error) {
+	if e.K8sClient != nil {
+		var cancel context.CancelFunc
+		ctx, cancel = withEnrichmentTimeout(ctx, enrichmentK8sTimeout)
+		defer cancel()
+	}
+
 	if rawEvent == nil {
 		return nil, fmt.Errorf("nil DNS event")
 	}
@@ -1135,6 +1172,12 @@ func (e *Enricher) EnrichFileEvent(
 	ctx context.Context,
 	rawEvent interface{},
 ) (*EnrichedEvent, error) {
+	if e.K8sClient != nil {
+		var cancel context.CancelFunc
+		ctx, cancel = withEnrichmentTimeout(ctx, enrichmentK8sTimeout)
+		defer cancel()
+	}
+
 	if rawEvent == nil {
 		return nil, fmt.Errorf("nil file event")
 	}
@@ -1233,6 +1276,12 @@ func (e *Enricher) EnrichCapabilityEvent(
 	ctx context.Context,
 	rawEvent interface{},
 ) (*EnrichedEvent, error) {
+	if e.K8sClient != nil {
+		var cancel context.CancelFunc
+		ctx, cancel = withEnrichmentTimeout(ctx, enrichmentK8sTimeout)
+		defer cancel()
+	}
+
 	if rawEvent == nil {
 		return nil, fmt.Errorf("nil capability event")
 	}
