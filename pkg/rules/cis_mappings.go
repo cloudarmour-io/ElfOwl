@@ -726,7 +726,7 @@ var CISControls = []*Rule{
 			{
 				Field:    "container.isolation_level",
 				Operator: "less_than",
-				Value:    2,
+				Value:    1,
 			},
 		},
 	},
@@ -745,5 +745,4 @@ var CISControls = []*Rule{
 			},
 		},
 	},
-
 }

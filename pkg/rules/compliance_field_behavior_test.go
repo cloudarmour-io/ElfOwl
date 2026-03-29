@@ -182,14 +182,14 @@ func TestCIS492IsolationLevelBehavior(t *testing.T) {
 	}
 
 	violations := engine.Match(event)
-	if !hasControl(violations, "CIS_4.9.2") {
-		t.Fatalf("expected CIS_4.9.2 when isolation level is 1")
+	if hasControl(violations, "CIS_4.9.2") {
+		t.Fatalf("did not expect CIS_4.9.2 when isolation level is 1")
 	}
 
-	event.Container.IsolationLevel = 2
+	event.Container.IsolationLevel = 0
 	violations = engine.Match(event)
-	if hasControl(violations, "CIS_4.9.2") {
-		t.Fatalf("did not expect CIS_4.9.2 when isolation level is 2")
+	if !hasControl(violations, "CIS_4.9.2") {
+		t.Fatalf("expected CIS_4.9.2 when isolation level is 0")
 	}
 }
 
