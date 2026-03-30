@@ -877,6 +877,7 @@ func (e *Enricher) EnrichProcessEvent(
 			containerCtx.RunAsRoot = podMeta.RunAsRootContainer || (uidVal == 0)
 		}
 		containerCtx.AllowPrivilegeEscalation = podMeta.AllowPrivilegeEscalation
+		containerCtx.AllowPrivilegeEscalationKnown = true
 		containerCtx.Privileged = podMeta.Privileged
 		containerCtx.ReadOnlyFilesystem = podMeta.ReadOnlyRootFilesystem
 		containerCtx.HostNetwork = podMeta.HostNetwork
@@ -896,7 +897,8 @@ func (e *Enricher) EnrichProcessEvent(
 	} else {
 		// Fallback to defaults when pod metadata not available
 		containerCtx.RunAsRoot = uidVal == 0
-		containerCtx.AllowPrivilegeEscalation = true // Default to true (least restrictive)
+		containerCtx.AllowPrivilegeEscalation = false
+		containerCtx.AllowPrivilegeEscalationKnown = false
 		containerCtx.Privileged = false
 		containerCtx.ReadOnlyFilesystem = false
 		containerCtx.HostNetwork = false
@@ -1214,6 +1216,8 @@ func (e *Enricher) EnrichFileEvent(
 		}
 		k8sCtx.AuditLoggingEnabled = podMeta.AuditLoggingEnabled
 		containerCtx.ContainerName = podMeta.ContainerName
+		containerCtx.AllowPrivilegeEscalation = podMeta.AllowPrivilegeEscalation
+		containerCtx.AllowPrivilegeEscalationKnown = true
 		// ANCHOR: Compliance fields for file events - Feature: image/volume/kernel signals - Mar 22, 2026
 		// Propagates pod-derived compliance signals into file events for rule evaluation.
 		applyPodComplianceFields(containerCtx, podMeta)
@@ -1226,7 +1230,10 @@ func (e *Enricher) EnrichFileEvent(
 	containerCtx.CPULimit = ""              // No limit by default
 	containerCtx.MemoryRequest = ""         // No request by default
 	containerCtx.CPURequest = ""            // No request by default
-	containerCtx.AllowPrivilegeEscalation = true
+	if !containerCtx.AllowPrivilegeEscalationKnown {
+		containerCtx.AllowPrivilegeEscalation = false
+		containerCtx.AllowPrivilegeEscalationKnown = false
+	}
 
 	enriched := &EnrichedEvent{
 		RawEvent:   rawEvent,
@@ -1322,6 +1329,8 @@ func (e *Enricher) EnrichCapabilityEvent(
 		}
 		k8sCtx.AuditLoggingEnabled = podMeta.AuditLoggingEnabled
 		containerCtx.ContainerName = podMeta.ContainerName
+		containerCtx.AllowPrivilegeEscalation = podMeta.AllowPrivilegeEscalation
+		containerCtx.AllowPrivilegeEscalationKnown = true
 		// ANCHOR: Compliance fields for capability events - Feature: image/volume/kernel signals - Mar 22, 2026
 		// Propagates pod-derived compliance signals into capability events for rule evaluation.
 		applyPodComplianceFields(containerCtx, podMeta)
@@ -1329,8 +1338,11 @@ func (e *Enricher) EnrichCapabilityEvent(
 
 	// Build container context with capability defaults
 	containerCtx.RunAsRoot = uidVal == 0
-	containerCtx.AllowPrivilegeEscalation = true // Default to true (least restrictive)
-	containerCtx.Privileged = false              // Default to false
+	if !containerCtx.AllowPrivilegeEscalationKnown {
+		containerCtx.AllowPrivilegeEscalation = false
+		containerCtx.AllowPrivilegeEscalationKnown = false
+	}
+	containerCtx.Privileged = false // Default to false
 
 	enriched := &EnrichedEvent{
 		RawEvent:   rawEvent,

@@ -523,6 +523,38 @@ func TestConditionEvaluation(t *testing.T) {
 			expected: false,
 		},
 		{
+			name: "AllowPrivilegeEscalation known value matches",
+			event: &enrichment.EnrichedEvent{
+				EventType: "process_execution",
+				Container: &enrichment.ContainerContext{
+					AllowPrivilegeEscalation:      true,
+					AllowPrivilegeEscalationKnown: true,
+				},
+			},
+			condition: Condition{
+				Field:    "container.allow_privilege_escalation",
+				Operator: "equals",
+				Value:    true,
+			},
+			expected: true,
+		},
+		{
+			name: "AllowPrivilegeEscalation unknown value does not match",
+			event: &enrichment.EnrichedEvent{
+				EventType: "process_execution",
+				Container: &enrichment.ContainerContext{
+					AllowPrivilegeEscalation:      true,
+					AllowPrivilegeEscalationKnown: false,
+				},
+			},
+			condition: Condition{
+				Field:    "container.allow_privilege_escalation",
+				Operator: "equals",
+				Value:    true,
+			},
+			expected: false,
+		},
+		{
 			name: "Regex operator - true match",
 			event: &enrichment.EnrichedEvent{
 				EventType: "file_write",

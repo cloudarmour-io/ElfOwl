@@ -77,26 +77,27 @@ type ContainerContext struct {
 	Privileged    bool              `json:"privileged"`
 	RunAsRoot     bool              `json:"run_as_root"`
 	// ANCHOR: Extended security context fields for Phase 1 - Dec 26, 2025
-	AllowPrivilegeEscalation bool   `json:"allow_privilege_escalation"`
-	HostNetwork              bool   `json:"host_network"`
-	HostIPC                  bool   `json:"host_ipc"`
-	HostPID                  bool   `json:"host_pid"`
-	SeccompProfile           string `json:"seccomp_profile"`
-	ApparmorProfile          string `json:"apparmor_profile"`
-	SELinuxLevel             string `json:"selinux_level"`
-	ImagePullPolicy          string `json:"image_pull_policy"`
-	ImageScanStatus          string `json:"image_scan_status"`
-	ImageRegistryAuth        bool   `json:"image_registry_auth"`
-	ImageSigned              bool   `json:"image_signed"`
-	MemoryLimit              string `json:"memory_limit"`
-	CPULimit                 string `json:"cpu_limit"`
-	MemoryRequest            string `json:"memory_request"`
-	CPURequest               string `json:"cpu_request"`
-	StorageRequest           string `json:"storage_request"`
-	ReadOnlyFilesystem       bool   `json:"read_only_filesystem"`
-	VolumeType               string `json:"volume_type"`
-	IsolationLevel           int    `json:"isolation_level"`
-	KernelHardening          bool   `json:"kernel_hardening"`
+	AllowPrivilegeEscalation      bool   `json:"allow_privilege_escalation"`
+	AllowPrivilegeEscalationKnown bool   `json:"allow_privilege_escalation_known"`
+	HostNetwork                   bool   `json:"host_network"`
+	HostIPC                       bool   `json:"host_ipc"`
+	HostPID                       bool   `json:"host_pid"`
+	SeccompProfile                string `json:"seccomp_profile"`
+	ApparmorProfile               string `json:"apparmor_profile"`
+	SELinuxLevel                  string `json:"selinux_level"`
+	ImagePullPolicy               string `json:"image_pull_policy"`
+	ImageScanStatus               string `json:"image_scan_status"`
+	ImageRegistryAuth             bool   `json:"image_registry_auth"`
+	ImageSigned                   bool   `json:"image_signed"`
+	MemoryLimit                   string `json:"memory_limit"`
+	CPULimit                      string `json:"cpu_limit"`
+	MemoryRequest                 string `json:"memory_request"`
+	CPURequest                    string `json:"cpu_request"`
+	StorageRequest                string `json:"storage_request"`
+	ReadOnlyFilesystem            bool   `json:"read_only_filesystem"`
+	VolumeType                    string `json:"volume_type"`
+	IsolationLevel                int    `json:"isolation_level"`
+	KernelHardening               bool   `json:"kernel_hardening"`
 }
 
 // ProcessContext captures process metadata from cilium/ebpf events

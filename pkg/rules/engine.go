@@ -459,6 +459,9 @@ func (e *Engine) extractField(event *enrichment.EnrichedEvent, fieldPath string)
 	// New fields for Phase 1 CIS control expansion
 	case "container.allow_privilege_escalation":
 		if event.Container != nil {
+			if !event.Container.AllowPrivilegeEscalationKnown {
+				return nil
+			}
 			return event.Container.AllowPrivilegeEscalation
 		}
 	case "container.host_network":
