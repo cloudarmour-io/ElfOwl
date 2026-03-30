@@ -60,6 +60,7 @@ if [[ "$REBUILD" -eq 1 ]] || ! multipass exec "$VM_NAME" -- bash -lc "test -x '$
     set -euo pipefail
     export PATH=/usr/local/go/bin:\$PATH
     cd '$VM_PROJECT_DIR'
+    make -C pkg/ebpf/programs all
     GOCACHE=/tmp/elf-owl-gocache GOMODCACHE=/tmp/elf-owl-gomodcache go build -mod=mod -o elf-owl ./cmd/elf-owl
   "
 fi
