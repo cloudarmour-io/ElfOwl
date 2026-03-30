@@ -35,6 +35,7 @@ type EngineConfig struct {
 	ConfigMapDataKey   string                // ConfigMap data key for rule YAML (default: "rules.yaml")
 	K8sClientset       *kubernetes.Clientset // K8s client for ConfigMap API access
 	Ctx                context.Context       // Context for K8s API calls
+	StrictSource       bool                  // When true, do not fall back to alternate sources on load errors
 }
 
 // Rule defines a CIS control detection rule
@@ -131,6 +132,9 @@ func NewEngineWithConfig(config *EngineConfig) (*Engine, error) {
 	if config.RuleFilePath != "" {
 		loadedRules, err := LoadRulesFromFile(config.RuleFilePath)
 		if err != nil {
+			if config.StrictSource {
+				return nil, fmt.Errorf("failed to load rules from file %s: %w", config.RuleFilePath, err)
+			}
 			logger.Warn("failed to load rules from file, trying ConfigMap",
 				zap.String("file", config.RuleFilePath),
 				zap.Error(err))
@@ -174,6 +178,9 @@ func NewEngineWithConfig(config *EngineConfig) (*Engine, error) {
 		}
 		loadedRules, err := LoadRulesFromConfigMap(config.Ctx, config.K8sClientset, config.ConfigMapName, config.ConfigMapNamespace, dataKey)
 		if err != nil {
+			if config.StrictSource {
+				return nil, fmt.Errorf("failed to load rules from ConfigMap %s/%s: %w", config.ConfigMapNamespace, config.ConfigMapName, err)
+			}
 			logger.Warn("failed to load rules from ConfigMap, using hardcoded rules",
 				zap.String("configmap", config.ConfigMapName),
 				zap.String("namespace", config.ConfigMapNamespace),
