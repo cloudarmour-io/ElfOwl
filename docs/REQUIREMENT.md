@@ -27,7 +27,7 @@ elf-owl is the **compliance and audit layer** in a multi-layer security model:
 - **Runtime layer:** threat detection and enforcement (e.g., process, file, and capability monitoring with optional blocking).
 - **Compliance layer (elf-owl):** continuous CIS control detection with signed/encrypted evidence.
 
-In the unified CloudArmour model, elf-owl acts as a **single-replica, read-only controller** that:
+In the unified CloudArmour model, elf-owl acts as a **per-node DaemonSet, read-only observer** that:
 
 - Watches Kubernetes objects relevant to CIS controls (pods, service accounts, RBAC, network policies).
 - Correlates runtime eBPF events with Kubernetes metadata.

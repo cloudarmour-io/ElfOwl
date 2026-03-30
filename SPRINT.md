@@ -8,9 +8,9 @@
 
 ## Executive Summary
 
-elf-owl is a Kubernetes compliance agent that enriches goBPF security events with Kubernetes metadata (pod specs, RBAC, network policies) and evaluates them against 48 automated CIS Kubernetes v1.8 controls.
+elf-owl is a Kubernetes compliance agent that enriches cilium/ebpf kernel events with Kubernetes metadata (pod specs, RBAC, network policies) and evaluates them against 48 automated CIS Kubernetes v1.8 controls.
 
-**Architecture:** goBPF Events → Event Enricher → K8s Context Lookup → Rule Engine → CIS Violation Detection
+**Architecture:** cilium/ebpf Events → Event Enricher → K8s Context Lookup → Rule Engine → CIS Violation Detection
 
 **Progress:** 78% Complete (Week 1-2 done, Week 3 starting)
 
@@ -365,12 +365,12 @@ test/fixtures/sample_events.go      - Realistic event samples
 - `gopkg.in/yaml.v3` - YAML parsing for rule files
 - `k8s.io/client-go` - Kubernetes API client
 - `go.uber.org/zap` - Structured logging
-- `github.com/udyansh/gobpf` - goBPF event types
+- `github.com/cilium/ebpf` - cilium/ebpf kernel event library
 
 ### System Requirements
 - Go 1.19+
 - Kubernetes 1.24+ (for K8s API compatibility)
-- Linux with eBPF support (for goBPF)
+- Linux 5.4+ with eBPF support
 
 ### Development Tools
 - Standard Go testing framework
@@ -383,7 +383,7 @@ test/fixtures/sample_events.go      - Realistic event samples
 
 ```
 ┌─────────────────────┐
-│   goBPF Events      │
+│  cilium/ebpf Events │
 │ (Process/File/Net)  │
 └──────────┬──────────┘
            │

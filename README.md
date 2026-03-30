@@ -2,7 +2,7 @@
 
 **A read-only, push-only compliance agent for CIS Kubernetes v1.8 detection and monitoring**
 
-> **Status:** Core pipeline implemented; see `docs/TODO_2026026.md` for remaining gaps.
+> **Status:** Core pipeline implemented; see `docs/TODO_20260326.md` for remaining gaps.
 > **Current Version:** 0.1.0 (Development)
 > **Date:** March 26, 2026
 
