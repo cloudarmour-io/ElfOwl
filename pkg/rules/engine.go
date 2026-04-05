@@ -35,6 +35,7 @@ type EngineConfig struct {
 	ConfigMapDataKey   string                // ConfigMap data key for rule YAML (default: "rules.yaml")
 	K8sClientset       *kubernetes.Clientset // K8s client for ConfigMap API access
 	Ctx                context.Context       // Context for K8s API calls
+	StrictSource       bool                  // When true, do not fall back to alternate sources on load errors
 }
 
 // Rule defines a CIS control detection rule
@@ -48,9 +49,10 @@ type Rule struct {
 
 // Condition is a single matching criterion
 type Condition struct {
-	Field    string
-	Operator string
-	Value    interface{}
+	Field         string
+	Operator      string
+	Value         interface{}
+	compiledRegex *regexp.Regexp
 }
 
 // Violation represents a detected CIS violation
@@ -100,6 +102,7 @@ func NewEngine(ruleFilePath ...string) (*Engine, error) {
 		Rules:  rules,
 		Logger: logger,
 	}
+	prepareRuleCaches(engine.Rules, logger)
 
 	return engine, nil
 }
@@ -129,6 +132,9 @@ func NewEngineWithConfig(config *EngineConfig) (*Engine, error) {
 	if config.RuleFilePath != "" {
 		loadedRules, err := LoadRulesFromFile(config.RuleFilePath)
 		if err != nil {
+			if config.StrictSource {
+				return nil, fmt.Errorf("failed to load rules from file %s: %w", config.RuleFilePath, err)
+			}
 			logger.Warn("failed to load rules from file, trying ConfigMap",
 				zap.String("file", config.RuleFilePath),
 				zap.Error(err))
@@ -172,6 +178,9 @@ func NewEngineWithConfig(config *EngineConfig) (*Engine, error) {
 		}
 		loadedRules, err := LoadRulesFromConfigMap(config.Ctx, config.K8sClientset, config.ConfigMapName, config.ConfigMapNamespace, dataKey)
 		if err != nil {
+			if config.StrictSource {
+				return nil, fmt.Errorf("failed to load rules from ConfigMap %s/%s: %w", config.ConfigMapNamespace, config.ConfigMapName, err)
+			}
 			logger.Warn("failed to load rules from ConfigMap, using hardcoded rules",
 				zap.String("configmap", config.ConfigMapName),
 				zap.String("namespace", config.ConfigMapNamespace),
@@ -196,6 +205,7 @@ func NewEngineWithConfig(config *EngineConfig) (*Engine, error) {
 		Rules:  rules,
 		Logger: logger,
 	}
+	prepareRuleCaches(engine.Rules, logger)
 
 	logger.Info("rule engine initialized", zap.String("rule_source", ruleSource))
 	return engine, nil
@@ -213,8 +223,8 @@ func (e *Engine) Match(event *enrichment.EnrichedEvent) []*Violation {
 
 		// Evaluate all conditions
 		allMatch := true
-		for _, cond := range rule.Conditions {
-			if !e.evaluateCondition(event, cond) {
+		for i := range rule.Conditions {
+			if !e.evaluateCondition(event, &rule.Conditions[i]) {
 				allMatch = false
 				break
 			}
@@ -238,7 +248,11 @@ func (e *Engine) Match(event *enrichment.EnrichedEvent) []*Violation {
 }
 
 // evaluateCondition evaluates a single condition against an event
-func (e *Engine) evaluateCondition(event *enrichment.EnrichedEvent, cond Condition) bool {
+func (e *Engine) evaluateCondition(event *enrichment.EnrichedEvent, cond *Condition) bool {
+	if cond == nil {
+		return false
+	}
+
 	// ANCHOR: Condition evaluation for CIS rule matching - Dec 26, 2025
 	// Implements field extraction and operator-based matching
 	// Supports: equals, not_equals, contains, in, regex patterns
@@ -267,10 +281,12 @@ func (e *Engine) evaluateCondition(event *enrichment.EnrichedEvent, cond Conditi
 		return false
 
 	case "in":
-		return valueInSlice(cond.Value, fieldValue)
+		matched, valid := valueInSlice(cond.Value, fieldValue)
+		return valid && matched
 
 	case "not_in":
-		return !valueInSlice(cond.Value, fieldValue)
+		matched, valid := valueInSlice(cond.Value, fieldValue)
+		return valid && !matched
 
 	case "greater_than":
 		fv, fOk := toFloat(fieldValue)
@@ -291,16 +307,41 @@ func (e *Engine) evaluateCondition(event *enrichment.EnrichedEvent, cond Conditi
 		if !ok {
 			return false
 		}
-		re, err := regexp.Compile(pattern)
-		if err != nil {
-			e.Logger.Warn("invalid regex pattern", zap.String("pattern", pattern), zap.Error(err))
-			return false
+		if cond.compiledRegex != nil {
+			return cond.compiledRegex.MatchString(str)
 		}
-		return re.MatchString(str)
+		re, err := regexp.Compile(pattern)
+		return err == nil && re.MatchString(str)
 
 	default:
 		e.Logger.Warn("unknown operator", zap.String("operator", cond.Operator))
 		return false
+	}
+}
+
+func prepareRuleCaches(rules []*Rule, logger *zap.Logger) {
+	for _, rule := range rules {
+		if rule == nil {
+			continue
+		}
+		for i := range rule.Conditions {
+			cond := &rule.Conditions[i]
+			if cond.Operator != "regex" {
+				continue
+			}
+			pattern, ok := cond.Value.(string)
+			if !ok {
+				continue
+			}
+			re, err := regexp.Compile(pattern)
+			if err != nil {
+				if logger != nil {
+					logger.Warn("invalid regex pattern", zap.String("pattern", pattern), zap.Error(err))
+				}
+				continue
+			}
+			cond.compiledRegex = re
+		}
 	}
 }
 
@@ -418,6 +459,9 @@ func (e *Engine) extractField(event *enrichment.EnrichedEvent, fieldPath string)
 	// New fields for Phase 1 CIS control expansion
 	case "container.allow_privilege_escalation":
 		if event.Container != nil {
+			if !event.Container.AllowPrivilegeEscalationKnown {
+				return nil
+			}
 			return event.Container.AllowPrivilegeEscalation
 		}
 	case "container.host_network":
@@ -559,19 +603,23 @@ func (e *Engine) extractField(event *enrichment.EnrichedEvent, fieldPath string)
 }
 
 // valueInSlice checks if fieldValue is contained within slice-like condValue
-func valueInSlice(condValue interface{}, fieldValue interface{}) bool {
+func valueInSlice(condValue interface{}, fieldValue interface{}) (bool, bool) {
+	if condValue == nil {
+		return false, false
+	}
+
 	val := reflect.ValueOf(condValue)
 	if val.Kind() != reflect.Slice && val.Kind() != reflect.Array {
-		return false
+		return false, false
 	}
 
 	for i := 0; i < val.Len(); i++ {
 		if normalizedEqual(val.Index(i).Interface(), fieldValue) {
-			return true
+			return true, true
 		}
 	}
 
-	return false
+	return false, true
 }
 
 func normalizedEqual(lhs, rhs interface{}) bool {

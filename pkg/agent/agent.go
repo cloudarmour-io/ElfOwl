@@ -75,6 +75,9 @@ type Agent struct {
 	EventBuffer *evidence.Buffer
 	ruleMu      sync.RWMutex
 
+	ruleReloadInterval time.Duration
+	ruleReloadTimeout  time.Duration
+
 	// Metrics
 	MetricsRegistry MetricsRecorder
 
@@ -118,6 +121,8 @@ func NewAgent(config *Config) (*Agent, error) {
 		eventsChan:      make(chan interface{}, 1000),
 		MetricsRegistry: metrics.NewRegistry(),
 		startTime:       time.Now(),
+		ruleReloadInterval: ruleReloadInterval,
+		ruleReloadTimeout:  ruleReloadTimeout,
 	}
 
 	// ANCHOR: Defer monitor creation to Start() - Fix: placeholder ProgramSet lifecycle fragility - Mar 29, 2026
@@ -817,7 +822,7 @@ func (a *Agent) watchRuleUpdates(ctx context.Context) {
 		return
 	}
 
-	ticker := time.NewTicker(ruleReloadInterval)
+	ticker := time.NewTicker(a.effectiveRuleReloadInterval())
 	defer ticker.Stop()
 
 	currentSignature := ruleEngineSignature(a.getRuleEngine())
@@ -825,8 +830,10 @@ func (a *Agent) watchRuleUpdates(ctx context.Context) {
 	for {
 		select {
 		case <-ticker.C:
-			reloadCtx, cancel := context.WithTimeout(ctx, ruleReloadTimeout)
-			engine, err := rules.NewEngineWithConfig(a.ruleEngineConfig(reloadCtx))
+			reloadCtx, cancel := context.WithTimeout(ctx, a.effectiveRuleReloadTimeout())
+			reloadConfig := a.ruleEngineConfig(reloadCtx)
+			reloadConfig.StrictSource = true
+			engine, err := rules.NewEngineWithConfig(reloadConfig)
 			cancel()
 			if err != nil {
 				a.Logger.Warn("rule reload failed", zap.Error(err))
@@ -848,6 +855,20 @@ func (a *Agent) watchRuleUpdates(ctx context.Context) {
 			return
 		}
 	}
+}
+
+func (a *Agent) effectiveRuleReloadInterval() time.Duration {
+	if a == nil || a.ruleReloadInterval <= 0 {
+		return ruleReloadInterval
+	}
+	return a.ruleReloadInterval
+}
+
+func (a *Agent) effectiveRuleReloadTimeout() time.Duration {
+	if a == nil || a.ruleReloadTimeout <= 0 {
+		return ruleReloadTimeout
+	}
+	return a.ruleReloadTimeout
 }
 
 // Stop gracefully stops the agent

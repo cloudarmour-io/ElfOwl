@@ -24,14 +24,16 @@ import (
 
 // Client provides read-only access to Kubernetes API
 type Client struct {
-	clientset  *kubernetes.Clientset
-	config     *rest.Config
-	cache      *MetadataCache
-	apiLimiter *rate.Limiter
-	auditMu    sync.RWMutex
-	auditMemo  auditLoggingMemo
-	rbacMu     sync.RWMutex
-	rbacMemo   apiGroupMemo
+	clientset             *kubernetes.Clientset
+	config                *rest.Config
+	cache                 *MetadataCache
+	apiLimiter            *rate.Limiter
+	discoverServerGroups  func() (*metav1.APIGroupList, error)
+	listKubeSystemPods    func(ctx context.Context) (*corev1.PodList, error)
+	auditMu               sync.RWMutex
+	auditMemo             auditLoggingMemo
+	rbacMu                sync.RWMutex
+	rbacMemo              apiGroupMemo
 }
 
 type auditLoggingMemo struct {
@@ -85,6 +87,12 @@ func NewClient(inCluster bool) (*Client, error) {
 			rate.Limit(loadK8sAPIRateLimit()),
 			loadK8sAPIBurst(),
 		),
+		discoverServerGroups: func() (*metav1.APIGroupList, error) {
+			return clientset.Discovery().ServerGroups()
+		},
+		listKubeSystemPods: func(ctx context.Context) (*corev1.PodList, error) {
+			return clientset.CoreV1().Pods("kube-system").List(ctx, metav1.ListOptions{})
+		},
 	}, nil
 }
 
@@ -536,7 +544,7 @@ const wildcardVerbWeight = 100
 // ANCHOR: RBAC API capability detection - Fix: RBACEnforced always true - Mar 29, 2026
 // Uses discovery groups with memoized TTL to avoid per-event API discovery calls.
 func (c *Client) IsRBACAPIEnabled(ctx context.Context) bool {
-	if c == nil || c.clientset == nil {
+	if c == nil || (c.clientset == nil && c.discoverServerGroups == nil) {
 		return false
 	}
 
@@ -559,14 +567,16 @@ func (c *Client) IsRBACAPIEnabled(ctx context.Context) bool {
 		if c.rbacMemo.checked {
 			return c.rbacMemo.enabled
 		}
-		return false
+		// Fail-open on transient discovery budget errors until first successful probe.
+		return true
 	}
-	groups, err := c.clientset.Discovery().ServerGroups()
+	groups, err := c.serverGroups()
 	if err != nil {
 		if c.rbacMemo.checked {
 			return c.rbacMemo.enabled
 		}
-		return false
+		// Fail-open on transient discovery errors until first successful probe.
+		return true
 	}
 
 	enabled := hasAPIGroup(groups, "rbac.authorization.k8s.io")
@@ -576,6 +586,19 @@ func (c *Client) IsRBACAPIEnabled(ctx context.Context) bool {
 		checkedAt: time.Now(),
 	}
 	return enabled
+}
+
+func (c *Client) serverGroups() (*metav1.APIGroupList, error) {
+	if c == nil {
+		return nil, fmt.Errorf("kubernetes client is nil")
+	}
+	if c.discoverServerGroups != nil {
+		return c.discoverServerGroups()
+	}
+	if c.clientset == nil {
+		return nil, fmt.Errorf("kubernetes clientset not configured")
+	}
+	return c.clientset.Discovery().ServerGroups()
 }
 
 func hasAPIGroup(groups *metav1.APIGroupList, target string) bool {
@@ -594,7 +617,7 @@ func hasAPIGroup(groups *metav1.APIGroupList, target string) bool {
 // ANCHOR: Audit logging status detection - Feature: CIS_5.5.1 inputs - Mar 29, 2026
 // Uses kube-apiserver pod command/args flags with short TTL caching.
 func (c *Client) IsAuditLoggingEnabled(ctx context.Context) bool {
-	if c == nil || c.clientset == nil {
+	if c == nil || (c.clientset == nil && c.listKubeSystemPods == nil) {
 		return false
 	}
 
@@ -618,13 +641,13 @@ func (c *Client) IsAuditLoggingEnabled(ctx context.Context) bool {
 		if c.auditMemo.checked {
 			return c.auditMemo.enabled
 		}
-		// Managed control planes often hide kube-apiserver pods; treat unknown as non-violating.
+		// Unknown audit status should not auto-pass CIS 5.5.1 checks.
 		c.auditMemo = auditLoggingMemo{
-			enabled:   true,
+			enabled:   false,
 			checked:   true,
 			checkedAt: time.Now(),
 		}
-		return true
+		return false
 	}
 	c.auditMemo = auditLoggingMemo{
 		enabled:   enabled,
@@ -638,7 +661,7 @@ func (c *Client) detectAuditLoggingEnabled(ctx context.Context) (bool, bool) {
 	if err := c.waitForAPIBudget(ctx); err != nil {
 		return false, false
 	}
-	pods, err := c.clientset.CoreV1().Pods("kube-system").List(ctx, metav1.ListOptions{})
+	pods, err := c.kubeSystemPods(ctx)
 	if err != nil {
 		return false, false
 	}
@@ -659,6 +682,19 @@ func (c *Client) detectAuditLoggingEnabled(ctx context.Context) (bool, bool) {
 		return false, false
 	}
 	return false, true
+}
+
+func (c *Client) kubeSystemPods(ctx context.Context) (*corev1.PodList, error) {
+	if c == nil {
+		return nil, fmt.Errorf("kubernetes client is nil")
+	}
+	if c.listKubeSystemPods != nil {
+		return c.listKubeSystemPods(ctx)
+	}
+	if c.clientset == nil {
+		return nil, fmt.Errorf("kubernetes clientset not configured")
+	}
+	return c.clientset.CoreV1().Pods("kube-system").List(ctx, metav1.ListOptions{})
 }
 
 func isAPIServerPod(pod corev1.Pod) bool {
