@@ -453,7 +453,7 @@ func (a *Agent) handleRuntimeEvent(
 				a.Logger.Info("CIS violation detected",
 					zap.String("control", violation.ControlID),
 					zap.String("severity", violation.Severity),
-					zap.String("pod", violation.Pod.PodName),
+					zap.String("pod", violationPodName(violation)),
 				)
 			}
 		}
@@ -1006,6 +1006,17 @@ func (a *Agent) getJWTToken() string {
 	// No token found
 	a.Logger.Warn("no JWT token found - API authentication will fail")
 	return ""
+}
+
+// ANCHOR: violationPodName nil-safe accessor - Bug: panic when K8sContext is nil - Apr 20, 2026
+// violation.Pod = event.Kubernetes, assigned at engine.go without a nil check.
+// Enrichment leaves Kubernetes nil when the K8s API lookup fails.
+// Both v and v.Pod are checked: a nil Violation element would panic before reaching v.Pod.
+func violationPodName(v *rules.Violation) string {
+	if v == nil || v.Pod == nil {
+		return ""
+	}
+	return v.Pod.PodName
 }
 
 func generateEphemeralKey() (string, error) {

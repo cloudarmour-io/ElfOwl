@@ -288,3 +288,75 @@ func TestHandlerRuntimeBehaviorMatrix(t *testing.T) {
 		}
 	}
 }
+
+// TestViolationPodName verifies the nil-safe helper used in violation logging.
+// ANCHOR: Regression test for nil violation.Pod guard - Bug: panic on unenriched events - Apr 20, 2026
+func TestViolationPodName(t *testing.T) {
+	if got := violationPodName(nil); got != "" {
+		t.Errorf("nil violation: expected \"\", got %q", got)
+	}
+	if got := violationPodName(&rules.Violation{Pod: nil}); got != "" {
+		t.Errorf("nil Pod: expected \"\", got %q", got)
+	}
+	if got := violationPodName(&rules.Violation{Pod: &enrichment.K8sContext{PodName: "my-pod"}}); got != "my-pod" {
+		t.Errorf("populated pod: expected \"my-pod\", got %q", got)
+	}
+}
+
+// TestHandleRuntimeEventNilPodNoRecover confirms handleRuntimeEvent does not panic
+// when a violation has a nil Pod (nil K8sContext from failed enrichment).
+// ANCHOR: Integration panic check for nil violation.Pod - Bug: panic on unenriched events - Apr 20, 2026
+func TestHandleRuntimeEventNilPodNoRecover(t *testing.T) {
+	defer func() {
+		if r := recover(); r != nil {
+			t.Fatalf("handleRuntimeEvent panicked with nil violation.Pod: %v", r)
+		}
+	}()
+
+	// Engine that always returns a violation with Pod == nil.
+	stubEngine := &rules.Engine{
+		Rules: []*rules.Rule{
+			{
+				ControlID:  "TEST_NIL_POD",
+				Title:      "always matches",
+				Severity:   "LOW",
+				EventTypes: []string{"process_execution"},
+				Conditions: []rules.Condition{
+					{Field: "event_type", Operator: "equals", Value: "process_execution"},
+				},
+			},
+		},
+	}
+
+	mockMetrics := &runtimeMockMetrics{}
+	agent := &Agent{
+		Config: &Config{
+			Agent: AgentConfig{
+				Rules:      RulesConfig{LogViolations: true},
+				Enrichment: EnrichmentConfig{KubernetesOnly: false},
+			},
+		},
+		Logger:          zap.NewNop(),
+		RuleEngine:      stubEngine,
+		Enricher:        &runtimeMockEnricher{},
+		EventBuffer:     evidence.NewBuffer(8, time.Second),
+		MetricsRegistry: mockMetrics,
+	}
+
+	enrichedEvent := &enrichment.EnrichedEvent{
+		EventType:  "process_execution",
+		Kubernetes: nil, // Pod will be nil in the violation
+		Timestamp:  time.Now(),
+	}
+
+	// logViolationDetails=true exercises the logging path that previously panicked.
+	agent.handleRuntimeEvent(
+		context.Background(),
+		enrichedEvent,
+		func(ctx context.Context, raw interface{}) (*enrichment.EnrichedEvent, error) {
+			return enrichedEvent, nil
+		},
+		"host discard", "host process", "api discard", "api fallback",
+		true,
+	)
+}
