@@ -82,9 +82,8 @@ type Agent struct {
 	MetricsRegistry MetricsRecorder
 
 	// Control channels
-	done       chan struct{}
-	eventsChan chan interface{}
-	startTime  time.Time
+	done      chan struct{}
+	startTime time.Time
 
 	// ANCHOR: Mutex-protected counters for goroutine safety - Dec 26, 2025
 	// Multiple event handler goroutines (process, network, file, capability) access
@@ -118,7 +117,6 @@ func NewAgent(config *Config) (*Agent, error) {
 		Config:          config,
 		Logger:          zapLogger,
 		done:            make(chan struct{}),
-		eventsChan:      make(chan interface{}, 1000),
 		MetricsRegistry: metrics.NewRegistry(),
 		startTime:       time.Now(),
 		ruleReloadInterval: ruleReloadInterval,
@@ -453,7 +451,7 @@ func (a *Agent) handleRuntimeEvent(
 				a.Logger.Info("CIS violation detected",
 					zap.String("control", violation.ControlID),
 					zap.String("severity", violation.Severity),
-					zap.String("pod", violation.Pod.PodName),
+					zap.String("pod", violationPodName(violation)),
 				)
 			}
 		}
@@ -960,8 +958,14 @@ func (a *Agent) getSigningKey() string {
 	}
 
 	// Try reading from secret file
+	// ANCHOR: TrimSpace on secret file reads - Bug: trailing newline corrupts base64 and Authorization headers - Apr 20, 2026
+	// Kubernetes secret volume mounts append a trailing newline to file contents.
+	// DELIBERATE NORMALIZATION: surrounding whitespace in these files is always stripped.
+	// Intentional whitespace in signing keys, encryption keys, or JWT tokens is not a supported
+	// use case — these values are base64 strings or Bearer tokens, both whitespace-sensitive.
+	// Env var sources are trusted as-is; they are not subject to Kubernetes mount behavior.
 	if data, err := os.ReadFile("/var/run/secrets/elf-owl-signing-key"); err == nil {
-		return string(data)
+		return strings.TrimSpace(string(data))
 	}
 
 	// Generate an ephemeral key when no key is configured.
@@ -981,7 +985,7 @@ func (a *Agent) getEncryptionKey() string {
 
 	// Try reading from secret file
 	if data, err := os.ReadFile("/var/run/secrets/elf-owl-encryption-key"); err == nil {
-		return string(data)
+		return strings.TrimSpace(string(data))
 	}
 
 	key, err := generateEphemeralKey()
@@ -1000,12 +1004,23 @@ func (a *Agent) getJWTToken() string {
 
 	// Try reading from secret file (Kubernetes)
 	if data, err := os.ReadFile(a.Config.Agent.OWL.Auth.TokenPath); err == nil {
-		return string(data)
+		return strings.TrimSpace(string(data))
 	}
 
 	// No token found
 	a.Logger.Warn("no JWT token found - API authentication will fail")
 	return ""
+}
+
+// ANCHOR: violationPodName nil-safe accessor - Bug: panic when K8sContext is nil - Apr 20, 2026
+// violation.Pod = event.Kubernetes, assigned at engine.go without a nil check.
+// Enrichment leaves Kubernetes nil when the K8s API lookup fails.
+// Both v and v.Pod are checked: a nil Violation element would panic before reaching v.Pod.
+func violationPodName(v *rules.Violation) string {
+	if v == nil || v.Pod == nil {
+		return ""
+	}
+	return v.Pod.PodName
 }
 
 func generateEphemeralKey() (string, error) {
