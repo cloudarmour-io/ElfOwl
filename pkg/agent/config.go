@@ -34,6 +34,7 @@ type AgentConfig struct {
 	OWL        OWLConfig        `yaml:"owl_api"`
 	Metrics    MetricsConfig    `yaml:"metrics"`
 	Health     HealthConfig     `yaml:"health"`
+	Webhook    WebhookConfig    `yaml:"webhook"`
 }
 
 // LoggingConfig defines logging behavior
@@ -174,6 +175,16 @@ type HealthConfig struct {
 	Path          string `yaml:"path"`
 }
 
+// ANCHOR: Webhook config - Feature: typed event ingestion endpoint - Apr 29, 2026
+// Disabled by default; enable with webhook.enabled: true in elf-owl.yaml.
+// Exposes POST /webhook/events accepting a typed JSON envelope {type, payload, timestamp}.
+type WebhookConfig struct {
+	Enabled         bool   `yaml:"enabled"`
+	ListenAddress   string `yaml:"listen_address"`
+	Path            string `yaml:"path"`
+	MaxPayloadBytes int64  `yaml:"max_payload_bytes"`
+}
+
 // LoadConfig loads configuration from YAML and environment variables
 func LoadConfig() (*Config, error) {
 	// Set configuration file paths
@@ -249,6 +260,14 @@ func (c *Config) applyEnvironmentOverrides() {
 	if v := os.Getenv("OWL_KUBERNETES_ONLY"); v != "" {
 		if parsed, err := strconv.ParseBool(v); err == nil {
 			c.Agent.Enrichment.KubernetesOnly = parsed
+		}
+	}
+
+	// ANCHOR: webhook enabled env override - Feature: typed event ingestion endpoint - Apr 29, 2026
+	// Allows start-agent.sh and CI scripts to enable the webhook without editing the YAML config.
+	if v := os.Getenv("OWL_WEBHOOK_ENABLED"); v != "" {
+		if parsed, err := strconv.ParseBool(v); err == nil {
+			c.Agent.Webhook.Enabled = parsed
 		}
 	}
 
@@ -420,6 +439,12 @@ func DefaultConfig() *Config {
 				Enabled:       true,
 				ListenAddress: ":9091",
 				Path:          "/health",
+			},
+			Webhook: WebhookConfig{
+				Enabled:         false,
+				ListenAddress:   ":9093",
+				Path:            "/webhook/events",
+				MaxPayloadBytes: 1048576, // 1 MiB
 			},
 		},
 	}
