@@ -128,10 +128,12 @@ type TLSClientHelloEvent struct {
 	SrcPort   uint16
 	DstPort   uint16
 	CgroupID  uint64
-	// ANCHOR: TLS buffer size increase - Fix: truncated extensions - Apr 26, 2026
-	// 1024 bytes matches vaanvil; covers real-world ClientHellos including large key_share extensions.
+	// ANCHOR: TLS buffer size increase to 2048 - Fix: TLS 1.3 key_share truncation - Apr 29, 2026
+	// 2048 bytes covers PQ-hybrid key_share extensions (X25519Kyber768 ~1200 bytes) that exceeded
+	// the previous 1024-byte limit and produced inconsistent JA3 fingerprints for TLS 1.3 clients.
+	// Must match TLS_METADATA_MAX in pkg/ebpf/programs/tls.c for binary.Read to succeed.
 	Length    uint32
-	Metadata  [1024]byte
+	Metadata  [2048]byte
 }
 
 // ============================================================================

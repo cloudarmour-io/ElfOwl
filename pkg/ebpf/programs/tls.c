@@ -6,7 +6,7 @@
 #define TLS_CONTENT_TYPE_HANDSHAKE 0x16
 #define TLS_HANDSHAKE_TYPE_CLIENT_HELLO 0x01
 #define TLS_MIN_RECORD_LEN 9
-#define TLS_METADATA_MAX 1024
+#define TLS_METADATA_MAX 2048
 
 struct tls_event {
 	__u32 pid;
@@ -23,6 +23,10 @@ struct tls_event {
 struct {
 	__uint(type, BPF_MAP_TYPE_PERF_EVENT_ARRAY);
 } tls_events SEC(".maps");
+
+// ANCHOR: TLS buffer 2048 - Fix: TLS 1.3 key_share truncation - Apr 29, 2026
+// 1024 bytes was insufficient for PQ-hybrid key_share extensions (X25519Kyber768 = ~1200 bytes).
+// 2048 bytes covers current and near-future hybrid key exchange groups without truncation.
 
 // ANCHOR: TLS event scratch map - Fix: BPF stack overflow with 512-byte metadata - Apr 26, 2026
 // BPF stack limit is 512 bytes total; tls_event with 512-byte metadata overflows it.
@@ -221,5 +225,77 @@ int tls_writev_monitor(struct sys_enter_writev_ctx *ctx)
 	return 0;
 }
 
+
+// ANCHOR: sendmsg TLS capture - Fix: Go crypto/tls and DTLS coverage gap - Apr 29, 2026
+// Go net/tls uses sendmsg(2) on non-blocking sockets; write/sendto miss those paths.
+// OpenSSL also routes DTLS output through sendmsg. Hooking this syscall closes the gap.
+
+// ANCHOR: tls_user_msghdr - Fix: vmlinux msghdr uses msg_iter not msg_iov - Apr 29, 2026
+// vmlinux.h exposes the kernel-side struct msghdr which stores data in msg_iter (iov_iter),
+// not msg_iov/msg_iovlen. bpf_probe_read_user reads from userspace memory, so we need
+// the POSIX userspace layout. Defined manually to avoid the name collision with vmlinux.
+struct tls_user_msghdr {
+	void         *msg_name;
+	__s32         msg_namelen;
+	__s32         _pad;        /* 4-byte alignment gap before pointer on x86-64 */
+	struct iovec *msg_iov;
+	__u64         msg_iovlen;
+	void         *msg_control;
+	__u64         msg_controllen;
+	__s32         msg_flags;
+};
+
+struct sys_enter_sendmsg_ctx {
+	__u16 common_type;
+	__u8 common_flags;
+	__u8 common_preempt_count;
+	__s32 common_pid;
+	long __syscall_nr;
+	long fd;
+	const void *msg;   /* void* avoids collision with vmlinux struct msghdr */
+	long flags;
+};
+
+SEC("tracepoint/syscalls/sys_enter_sendmsg")
+int tls_sendmsg_monitor(struct sys_enter_sendmsg_ctx *ctx)
+{
+	__u32 key = 0;
+	struct tls_user_msghdr hdr = {};
+	struct iovec iov = {};
+	__u8 first = 0;
+
+	if (!ctx->msg) {
+		return 0;
+	}
+
+	if (bpf_probe_read_user(&hdr, sizeof(hdr), ctx->msg) < 0) {
+		return 0;
+	}
+
+	if (hdr.msg_iovlen == 0 || !hdr.msg_iov) {
+		return 0;
+	}
+
+	if (bpf_probe_read_user(&iov, sizeof(iov), hdr.msg_iov) < 0) {
+		return 0;
+	}
+
+	if (!is_tls_client_hello((const __u8 *)iov.iov_base, (__u64)iov.iov_len)) {
+		return 0;
+	}
+
+	struct tls_event *evt = bpf_map_lookup_elem(&tls_scratch, &key);
+	if (!evt) {
+		return 0;
+	}
+
+	if (iov.iov_base) {
+		bpf_probe_read_user(&first, sizeof(first), iov.iov_base);
+	}
+	debug_tls_hit("sendmsg", (__u64)iov.iov_len, first);
+	fill_tls_event(evt, (const __u8 *)iov.iov_base, (__u64)iov.iov_len);
+	SUBMIT_EVENT(ctx, tls_events, evt);
+	return 0;
+}
 
 char LICENSE[] SEC("license") = "GPL";
