@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"go.uber.org/zap"
@@ -218,10 +219,16 @@ type WebhookPusher struct {
 	eventCh   chan WebhookEvent
 	logger    *zap.Logger
 	done      chan struct{}
+	wg        sync.WaitGroup
 }
 
-// NewWebhookPusher creates a WebhookPusher from the agent config.
+// ANCHOR: BatchSize guard - Bug fix: batch_size:0 causes blocking channel + flush-every-event - Apr 30, 2026
+// A user-supplied batch_size:0 would make the channel buffer 0 (synchronous/blocking Send) and
+// trigger len(batch)>=0 on every append (a flush-every-event loop). Guard to the default (100).
 func NewWebhookPusher(cfg WebhookConfig, clusterID, nodeName string, logger *zap.Logger) *WebhookPusher {
+	if cfg.BatchSize <= 0 {
+		cfg.BatchSize = 100
+	}
 	return &WebhookPusher{
 		config:    cfg,
 		clusterID: clusterID,
@@ -235,12 +242,16 @@ func NewWebhookPusher(cfg WebhookConfig, clusterID, nodeName string, logger *zap
 
 // Start launches the background flush goroutine.
 func (p *WebhookPusher) Start(ctx context.Context) {
+	p.wg.Add(1)
 	go p.flushLoop(ctx)
 }
 
-// Stop signals the flush goroutine to drain remaining events and exit.
+// ANCHOR: Stop drain guarantee - Bug fix: Stop returned before final POST completed - Apr 30, 2026
+// Closes done to signal the flush goroutine, then blocks on wg.Wait() until the goroutine
+// finishes its drain+flush. Without this, a fast exit could drop the last in-flight batch.
 func (p *WebhookPusher) Stop() {
 	close(p.done)
+	p.wg.Wait()
 }
 
 // Send enqueues an enriched event for outbound delivery.
@@ -259,6 +270,7 @@ func (p *WebhookPusher) Send(event *enrichment.EnrichedEvent, violations []*rule
 }
 
 func (p *WebhookPusher) flushLoop(ctx context.Context) {
+	defer p.wg.Done()
 	ticker := time.NewTicker(p.config.FlushInterval)
 	defer ticker.Stop()
 
@@ -287,20 +299,39 @@ func (p *WebhookPusher) flushLoop(ctx context.Context) {
 		case <-ticker.C:
 			flush()
 		case <-p.done:
-		draining:
-			for {
-				select {
-				case evt := <-p.eventCh:
-					batch = append(batch, evt)
-				default:
-					break draining
-				}
-			}
-			flush()
+			p.drainAndFlush(batch)
 			return
 		case <-ctx.Done():
+			p.drainAndFlush(batch)
 			return
 		}
+	}
+}
+
+// ANCHOR: drainAndFlush - Bug fix: ctx.Done path dropped in-flight batch - Apr 30, 2026
+// Drains any remaining events from the channel into the existing partial batch, then POSTs
+// using a fresh context.Background() timeout so the final flush succeeds even when the agent
+// context is already cancelled (which is the case on normal SIGTERM shutdown).
+func (p *WebhookPusher) drainAndFlush(batch []WebhookEvent) {
+draining:
+	for {
+		select {
+		case evt := <-p.eventCh:
+			batch = append(batch, evt)
+		default:
+			break draining
+		}
+	}
+	if len(batch) == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), p.config.Timeout)
+	defer cancel()
+	if err := p.post(ctx, batch); err != nil {
+		p.logger.Warn("webhook shutdown flush failed",
+			zap.Error(err),
+			zap.Int("batch_size", len(batch)),
+		)
 	}
 }
 
