@@ -127,16 +127,96 @@ static __always_inline __u32 copy_tls_metadata(const __u8 *buf, __u64 len, __u8 
 }
 
 
-static __always_inline void fill_tls_event(struct tls_event *evt, const __u8 *buf, __u64 len)
+// ANCHOR: dst_port extraction from socket sk_common - Bug: dst_port=0 broke cert probe - Apr 30, 2026
+// sys_enter_* tracepoints carry only the fd, not the peer address. Walk the kernel task's
+// file-descriptor table to reach the sock and read skc_dport / skc_family via CO-RE.
+// Path: task->files->fdt->fd[fd] -> file->private_data (struct socket*) -> sock->sk -> sk_common
+// skc_dport is stored in network byte order; bpf_ntohs converts to host order for userspace.
+// Returns 0 on any read failure so the event is still emitted without port data.
+static __always_inline __u16 fd_dst_port(unsigned int fd)
 {
-	evt->pid = current_pid();
-	evt->family = 0;
-	evt->protocol = IPPROTO_TCP;
+	struct task_struct *task = (struct task_struct *)bpf_get_current_task_btf();
+	if (!task)
+		return 0;
+
+	struct files_struct *files = BPF_CORE_READ(task, files);
+	if (!files)
+		return 0;
+
+	struct fdtable *fdt = BPF_CORE_READ(files, fdt);
+	if (!fdt)
+		return 0;
+
+	struct file **fdarr = BPF_CORE_READ(fdt, fd);
+	if (!fdarr)
+		return 0;
+
+	struct file *f = NULL;
+	if (bpf_core_read(&f, sizeof(f), &fdarr[fd]) < 0 || !f)
+		return 0;
+
+	// file->private_data points to struct socket for socket fds.
+	struct socket *sock = NULL;
+	if (bpf_core_read(&sock, sizeof(sock), &f->private_data) < 0 || !sock)
+		return 0;
+
+	struct sock *sk = BPF_CORE_READ(sock, sk);
+	if (!sk)
+		return 0;
+
+	__u16 dport_be = BPF_CORE_READ(sk, __sk_common.skc_dport);
+	__u16 family   = BPF_CORE_READ(sk, __sk_common.skc_family);
+
+	// Store family so fill_tls_event can set evt->family correctly.
+	// Return port in host byte order; caller sets evt->dst_port.
+	(void)family; // accessed via separate fd_family() if needed
+	return bpf_ntohs(dport_be);
+}
+
+static __always_inline __u16 fd_family(unsigned int fd)
+{
+	struct task_struct *task = (struct task_struct *)bpf_get_current_task_btf();
+	if (!task)
+		return 0;
+
+	struct files_struct *files = BPF_CORE_READ(task, files);
+	if (!files)
+		return 0;
+
+	struct fdtable *fdt = BPF_CORE_READ(files, fdt);
+	if (!fdt)
+		return 0;
+
+	struct file **fdarr = BPF_CORE_READ(fdt, fd);
+	if (!fdarr)
+		return 0;
+
+	struct file *f = NULL;
+	if (bpf_core_read(&f, sizeof(f), &fdarr[fd]) < 0 || !f)
+		return 0;
+
+	struct socket *sock = NULL;
+	if (bpf_core_read(&sock, sizeof(sock), &f->private_data) < 0 || !sock)
+		return 0;
+
+	struct sock *sk = BPF_CORE_READ(sock, sk);
+	if (!sk)
+		return 0;
+
+	return BPF_CORE_READ(sk, __sk_common.skc_family);
+}
+
+static __always_inline void fill_tls_event(struct tls_event *evt, const __u8 *buf, __u64 len,
+					   unsigned int fd)
+{
+	evt->pid       = current_pid();
+	evt->family    = fd_family(fd);
+	evt->protocol  = IPPROTO_TCP;
 	evt->direction = 1;
-	evt->src_port = 0;
-	evt->dst_port = 0;
+	evt->src_port  = 0;
+	evt->dst_port  = fd_dst_port(fd);
 	evt->cgroup_id = bpf_get_current_cgroup_id();
-	evt->length = copy_tls_metadata(buf, len, evt->metadata);
+	evt->length    = copy_tls_metadata(buf, len, evt->metadata);
 }
 
 static __always_inline void debug_tls_hit(const char *syscall, __u64 len, __u8 first)
@@ -163,7 +243,7 @@ int tls_write_monitor(struct sys_enter_write_ctx *ctx)
 		bpf_probe_read_user(&first, sizeof(first), ctx->buf);
 	}
 	debug_tls_hit("write", (__u64)ctx->count, first);
-	fill_tls_event(evt, (const __u8 *)ctx->buf, ctx->count);
+	fill_tls_event(evt, (const __u8 *)ctx->buf, ctx->count, ctx->fd);
 	SUBMIT_EVENT(ctx, tls_events, evt);
 	return 0;
 }
@@ -187,7 +267,7 @@ int tls_sendto_monitor(struct sys_enter_sendto_ctx *ctx)
 		bpf_probe_read_user(&first, sizeof(first), ctx->buff);
 	}
 	debug_tls_hit("sendto", (__u64)ctx->len, first);
-	fill_tls_event(evt, (const __u8 *)ctx->buff, (__u64)ctx->len);
+	fill_tls_event(evt, (const __u8 *)ctx->buff, (__u64)ctx->len, (unsigned int)ctx->fd);
 	SUBMIT_EVENT(ctx, tls_events, evt);
 	return 0;
 }
@@ -220,7 +300,7 @@ int tls_writev_monitor(struct sys_enter_writev_ctx *ctx)
 		bpf_probe_read_user(&first, sizeof(first), iov.iov_base);
 	}
 	debug_tls_hit("writev", (__u64)iov.iov_len, first);
-	fill_tls_event(evt, (const __u8 *)iov.iov_base, (__u64)iov.iov_len);
+	fill_tls_event(evt, (const __u8 *)iov.iov_base, (__u64)iov.iov_len, ctx->fd);
 	SUBMIT_EVENT(ctx, tls_events, evt);
 	return 0;
 }
@@ -293,7 +373,7 @@ int tls_sendmsg_monitor(struct sys_enter_sendmsg_ctx *ctx)
 		bpf_probe_read_user(&first, sizeof(first), iov.iov_base);
 	}
 	debug_tls_hit("sendmsg", (__u64)iov.iov_len, first);
-	fill_tls_event(evt, (const __u8 *)iov.iov_base, (__u64)iov.iov_len);
+	fill_tls_event(evt, (const __u8 *)iov.iov_base, (__u64)iov.iov_len, (unsigned int)ctx->fd);
 	SUBMIT_EVENT(ctx, tls_events, evt);
 	return 0;
 }
