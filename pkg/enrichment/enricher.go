@@ -450,6 +450,12 @@ func procContainerID(pid uint32) string {
 // Reads the real UID of a process from /proc/<pid>/status (first Uid: field = real UID).
 // Used by EnrichFileEvent which receives a FileEvent struct that carries no UID.
 // Returns 0 if the process has already exited or the file is unreadable.
+// ANCHOR: procUID/procComm TOCTOU - Known limitation: PID reuse for short-lived processes - Apr 30, 2026
+// These reads happen after the eBPF event is delivered to userspace. For processes that
+// exec and exit in under ~1ms the PID may already be reused by a different process, causing
+// the UID or command name to be attributed to the wrong process identity. This is an inherent
+// limitation of userspace /proc enrichment and cannot be fully eliminated without in-kernel
+// attribution at event-generation time.
 func procUID(pid uint32) uint32 {
 	if pid == 0 {
 		return 0

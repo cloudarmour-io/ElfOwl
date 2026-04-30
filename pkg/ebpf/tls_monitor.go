@@ -129,8 +129,19 @@ func (tm *TLSMonitor) eventLoop(ctx context.Context) {
 				TLS:       &enrichment.TLSContext{},
 				Timestamp: time.Now(),
 			}
+			// ANCHOR: TLS version drop log - Bug #13: out-of-range TLS version events silently discarded - Apr 30, 2026
+			// ParseJA3Metadata rejects ClientHellos with legacy_version outside 0x0301–0x0304.
+			// Log at Warn so operators can distinguish parse failures from capture failures.
 			// Parse in userspace to keep the BPF side small and verifier-friendly.
-			if meta, err := ParseJA3Metadata(evt.Metadata[:evt.Length]); err == nil {
+			meta, err := ParseJA3Metadata(evt.Metadata[:evt.Length])
+			if err != nil {
+				tm.logger.Warn("tls ja3 parse failed, event dropped",
+					zap.Error(err),
+					zap.Uint32("pid", evt.PID),
+					zap.Uint16("dst_port", evt.DstPort),
+				)
+			}
+			if err == nil {
 				tm.logger.Debug(
 					"tls ja3 parsed",
 					zap.String("ja3_fingerprint", meta.JA3Fingerprint),
@@ -179,8 +190,6 @@ func (tm *TLSMonitor) eventLoop(ctx context.Context) {
 					}
 				}
 				enriched.TLS = tlsCtx
-			} else {
-				tm.logger.Debug("tls ja3 parse skipped", zap.Error(err))
 			}
 			select {
 			case tm.eventChan <- enriched:
