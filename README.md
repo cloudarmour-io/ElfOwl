@@ -73,7 +73,7 @@ elf-owl/
 │   ├── helm/                    # Helm chart
 │   └── kustomize/               # Kustomize base + overlays
 ├── scripts/                     # Multipass-based setup/test helpers
-└── docs/                        # Installation/usage/reference docs
+└── docs/                        # Installation/usage/reference docs (organized by topic)
 ```
 
 ---
@@ -171,7 +171,7 @@ go mod download
 go build -mod=mod -o elf-owl ./cmd/elf-owl
 ```
 
-See `SETUP_LINUX.md` for full host setup including eBPF kernel requirements.
+See [`SETUP_LINUX.md`](docs/runbooks/SETUP_LINUX.md) for full host setup including eBPF kernel requirements.
 
 ---
 
