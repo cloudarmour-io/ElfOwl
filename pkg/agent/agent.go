@@ -620,10 +620,23 @@ func (a *Agent) handleCapabilityEvent(ctx context.Context, rawEnriched *enrichme
 }
 
 func (a *Agent) handleTLSEvent(ctx context.Context, rawEnriched *enrichment.EnrichedEvent) {
+	// ANCHOR: TLS cert field preservation - Bug: enricher overwrites TLS context losing cert probe data - Apr 30, 2026
+	// EnrichTLSEvent re-parses the raw bytes into a new TLSContext, discarding the cert fields
+	// (CertSHA256, CertIssuer, CertExpiry) that tls_monitor already probed and stored on rawEnriched.TLS.
+	// Wrap the enricher so we can copy those fields onto the returned event before it proceeds.
+	enrichWithCert := func(ctx context.Context, raw interface{}) (*enrichment.EnrichedEvent, error) {
+		ev, err := a.Enricher.EnrichTLSEvent(ctx, raw)
+		if ev != nil && rawEnriched.TLS != nil {
+			ev.TLS.CertSHA256 = rawEnriched.TLS.CertSHA256
+			ev.TLS.CertIssuer = rawEnriched.TLS.CertIssuer
+			ev.TLS.CertExpiry = rawEnriched.TLS.CertExpiry
+		}
+		return ev, err
+	}
 	a.handleRuntimeEvent(
 		ctx,
 		rawEnriched,
-		a.Enricher.EnrichTLSEvent,
+		enrichWithCert,
 		"discarded tls event: no context",
 		"processing tls event",
 		"discarded tls event: enrichment failed",
