@@ -20,19 +20,36 @@ import (
 // Expands only the documented sentinel variables that the YAML config is allowed to reference.
 // OWL_* vars cover all agent-specific overrides; HOSTNAME covers the node_name default pattern.
 // Any other $VAR or ${VAR} in the YAML (e.g. in rule strings) is left unexpanded.
+// ANCHOR: expandSentinelVars Hostname fallback - Bug: sudo strips HOSTNAME from env - Apr 30, 2026
+// sudo does not forward HOSTNAME (a bash internal) to the child environment, so os.Environ()
+// never contains it. Fall back to os.Hostname() (a syscall) so ${HOSTNAME} always resolves
+// to the real machine name regardless of how the agent was launched.
 func expandSentinelVars(s string) string {
 	var pairs []string
+
+	hostnameInEnv := false
 	for _, kv := range os.Environ() {
 		idx := strings.IndexByte(kv, '=')
 		if idx < 0 {
 			continue
 		}
 		key, val := kv[:idx], kv[idx+1:]
+		if key == "HOSTNAME" {
+			hostnameInEnv = true
+		}
 		if key == "HOSTNAME" || strings.HasPrefix(key, "OWL_") {
 			pairs = append(pairs, "${"+key+"}", val)
 			pairs = append(pairs, "$"+key, val)
 		}
 	}
+
+	if !hostnameInEnv {
+		if h, err := os.Hostname(); err == nil && h != "" {
+			pairs = append(pairs, "${HOSTNAME}", h)
+			pairs = append(pairs, "$HOSTNAME", h)
+		}
+	}
+
 	if len(pairs) == 0 {
 		return s
 	}
