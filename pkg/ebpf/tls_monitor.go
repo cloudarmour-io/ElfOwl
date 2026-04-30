@@ -160,7 +160,12 @@ func (tm *TLSMonitor) eventLoop(ctx context.Context) {
 					SNI:            meta.SNI,
 				}
 				// ANCHOR: cert probe on SNI with cache - Feature: cert_sha256 - Apr 26, 2026
-				// Cache hit: populate immediately. Cache miss: probe async so event loop is not blocked.
+				// Cache hit: populate immediately.
+				// Cache miss: probe synchronously via singleflight so cert fields are populated
+				// before the event is queued for the webhook pusher. singleflight deduplicates
+				// concurrent probes for the same SNI so only one outbound TLS dial occurs.
+				// Previously the probe ran in a background goroutine, causing the event to be
+				// pushed before the cert arrived and cert_sha256 to always be empty.
 				if meta.SNI != "" {
 					if cached := tm.getCachedCert(meta.SNI); cached != nil {
 						tlsCtx.CertSHA256 = cached.sha256
@@ -169,7 +174,7 @@ func (tm *TLSMonitor) eventLoop(ctx context.Context) {
 					} else {
 						sni := meta.SNI
 						dstPort := evt.DstPort
-						go tm.certGroup.Do(sni, func() (interface{}, error) {
+						tm.certGroup.Do(sni, func() (interface{}, error) { //nolint:errcheck
 							certSHA256, issuer, expiry := probeCert(sni, dstPort)
 							if certSHA256 == "" {
 								return nil, nil
@@ -187,6 +192,11 @@ func (tm *TLSMonitor) eventLoop(ctx context.Context) {
 							)
 							return nil, nil
 						})
+						if cached := tm.getCachedCert(sni); cached != nil {
+							tlsCtx.CertSHA256 = cached.sha256
+							tlsCtx.CertIssuer = cached.issuer
+							tlsCtx.CertExpiry = cached.expiry
+						}
 					}
 				}
 				enriched.TLS = tlsCtx
