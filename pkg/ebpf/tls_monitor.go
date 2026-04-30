@@ -1,11 +1,9 @@
 package ebpf
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
-	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"net"
@@ -111,8 +109,8 @@ func (tm *TLSMonitor) eventLoop(ctx context.Context) {
 				time.Sleep(10 * time.Millisecond)
 				continue
 			}
-			evt := &TLSClientHelloEvent{}
-			if err := binary.Read(bytes.NewReader(data), binary.LittleEndian, evt); err != nil {
+			evt, err := DecodeTLSEvent(data)
+			if err != nil {
 				tm.logger.Warn("parse tls event failed", zap.Error(err))
 				continue
 			}
@@ -159,8 +157,9 @@ func (tm *TLSMonitor) eventLoop(ctx context.Context) {
 						tlsCtx.CertExpiry = cached.expiry
 					} else {
 						sni := meta.SNI
+						dstPort := evt.DstPort
 						go tm.certGroup.Do(sni, func() (interface{}, error) {
-							certSHA256, issuer, expiry := probeCert(sni)
+							certSHA256, issuer, expiry := probeCert(sni, dstPort)
 							if certSHA256 == "" {
 								return nil, nil
 							}
@@ -197,13 +196,13 @@ func (tm *TLSMonitor) eventLoop(ctx context.Context) {
 	}
 }
 
-// ANCHOR: TLS certificate active probe - Feature: cert_sha256 via SNI - Apr 26, 2026
-// Dials host:443, grabs the leaf certificate DER, and computes SHA256 + issuer + expiry.
-// Matches vaanvil's probeTLSCertificate approach — entirely userspace, no eBPF involvement.
-func probeCert(sni string) (certSHA256, issuer string, expiry int64) {
+// ANCHOR: probeCert port parameter - Bug: hardcoded 443 missed non-standard TLS ports - Apr 30, 2026
+// Previously always dialed sni:443, so services on ports like 6443, 8443, 5671 never got cert metadata.
+// Now uses the destination port from the captured TLS event for correct certificate probing.
+func probeCert(sni string, port uint16) (certSHA256, issuer string, expiry int64) {
 	conn, err := tls.DialWithDialer(
 		&net.Dialer{Timeout: 3 * time.Second},
-		"tcp", net.JoinHostPort(sni, "443"),
+		"tcp", net.JoinHostPort(sni, fmt.Sprintf("%d", port)),
 		&tls.Config{ServerName: sni, InsecureSkipVerify: true},
 	)
 	if err != nil {
