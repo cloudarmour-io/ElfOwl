@@ -192,7 +192,14 @@ func NewAgent(config *Config) (*Agent, error) {
 	}
 
 	// Initialize enricher
-	enricher, err := enrichment.NewEnricher(agent.K8sClient, config.Agent.ClusterID, config.Agent.NodeName)
+	// ANCHOR: pass file path filter to enricher - Feature: file path watch/ignore - May 1, 2026
+	enricher, err := enrichment.NewEnricher(
+		agent.K8sClient,
+		config.Agent.ClusterID,
+		config.Agent.NodeName,
+		config.Agent.EBPF.File.WatchPaths,
+		config.Agent.EBPF.File.IgnorePaths,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create enricher: %w", err)
 	}
