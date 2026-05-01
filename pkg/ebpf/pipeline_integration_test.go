@@ -82,7 +82,7 @@ func TestMultiMonitorPipelineConvergence(t *testing.T) {
 
 	// Create all 5 monitors
 	processMonitor := NewProcessMonitor(NewMockProgramSet(NewMockReader()), logger)
-	networkMonitor := NewNetworkMonitor(NewMockProgramSet(NewMockReader()), logger)
+	networkMonitor := NewNetworkMonitor(NewMockProgramSet(NewMockReader()), logger, 100, nil, nil)
 	fileMonitor := NewFileMonitor(NewMockProgramSet(NewMockReader()), logger, 100, nil, nil)
 	capabilityMonitor := NewCapabilityMonitor(NewMockProgramSet(NewMockReader()), logger)
 	dnsMonitor := NewDNSMonitor(NewMockProgramSet(NewMockReader()), logger)
@@ -477,7 +477,7 @@ func TestPipelineDegradation(t *testing.T) {
 		Stop() error
 	}{
 		NewProcessMonitor(NewMockProgramSet(NewMockReader()), logger),
-		NewNetworkMonitor(NewMockProgramSet(NewMockReader()), logger),
+		NewNetworkMonitor(NewMockProgramSet(NewMockReader()), logger, 100, nil, nil),
 		NewFileMonitor(NewMockProgramSet(NewMockReader()), logger, 100, nil, nil),
 	}
 

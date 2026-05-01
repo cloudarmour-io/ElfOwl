@@ -8,6 +8,11 @@ import "errors"
 // When enrichment.kubernetes_only=true the agent discards such events.
 var ErrNoKubernetesContext = errors.New("no kubernetes pod context: event is not from a pod")
 
+// ANCHOR: ErrNetworkProtocolFiltered - Feature: network protocol filter - May 1, 2026
+// Returned by EnrichNetworkEvent when the protocol does not satisfy allow_protocols/ignore_protocols.
+// Always causes the event to be discarded regardless of the kubernetes_only setting.
+var ErrNetworkProtocolFiltered = errors.New("network event dropped by protocol filter")
+
 // ANCHOR: ErrFilePathFiltered - Bug: path filter bypassed when kubernetes_only=false - May 1, 2026
 // Returned by EnrichFileEvent when the file path does not satisfy watch_paths/ignore_paths.
 // Unlike ErrNoKubernetesContext, this error always causes the event to be discarded —

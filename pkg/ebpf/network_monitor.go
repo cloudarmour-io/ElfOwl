@@ -9,6 +9,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
@@ -27,16 +28,49 @@ type NetworkMonitor struct {
 	wg         sync.WaitGroup
 	started    bool
 	mu         sync.Mutex
+	// ANCHOR: early protocol filter in eventLoop - Feature: network protocol filter - May 1, 2026
+	// Filter is evaluated before the event enters eventChan so blocked protocols
+	// never consume channel capacity. chanSize comes from config buffer_size.
+	allowProtocols  []string
+	ignoreProtocols []string
 }
 
-// NewNetworkMonitor creates a new network monitor
-func NewNetworkMonitor(programSet *ProgramSet, logger *zap.Logger) *NetworkMonitor {
+// NewNetworkMonitor creates a new network monitor.
+// chanSize controls the eventChan buffer — pass config.Agent.EBPF.Network.BufferSize.
+// allowProtocols / ignoreProtocols are the same values used by the enricher; applying
+// them here prevents filtered events from ever entering the channel.
+func NewNetworkMonitor(programSet *ProgramSet, logger *zap.Logger, chanSize int, allowProtocols, ignoreProtocols []string) *NetworkMonitor {
 	return &NetworkMonitor{
-		programSet: programSet,
-		eventChan:  make(chan *enrichment.EnrichedEvent, 100),
-		logger:     logger,
-		stopChan:   make(chan struct{}),
+		programSet:      programSet,
+		eventChan:       make(chan *enrichment.EnrichedEvent, chanSize),
+		logger:          logger,
+		stopChan:        make(chan struct{}),
+		allowProtocols:  allowProtocols,
+		ignoreProtocols: ignoreProtocols,
 	}
+}
+
+// protocolAllowed returns false when the protocol should be dropped before entering the channel.
+func (nm *NetworkMonitor) protocolAllowed(protocol string) bool {
+	p := strings.ToLower(protocol)
+	if len(nm.allowProtocols) > 0 {
+		matched := false
+		for _, a := range nm.allowProtocols {
+			if strings.ToLower(a) == p {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	for _, ig := range nm.ignoreProtocols {
+		if strings.ToLower(ig) == p {
+			return false
+		}
+	}
+	return true
 }
 
 // Start begins monitoring network connection events
@@ -110,9 +144,12 @@ func (nm *NetworkMonitor) eventLoop(ctx context.Context) {
 			// Converts binary ports from network byte order
 			// Adds timestamp
 
-			protocol := "tcp"
-			if evt.Protocol == 17 { // IPPROTO_UDP
-				protocol = "udp"
+			// ANCHOR: early protocol filter in eventLoop - Feature: network protocol filter - May 1, 2026
+			// Resolve protocol via shared IPProtoName table, then check filter before
+			// allocating NetworkContext or touching the channel.
+			protocol := IPProtoName(evt.Protocol)
+			if !nm.protocolAllowed(protocol) {
+				continue
 			}
 
 			sourceIP, destinationIP := networkIPs(evt)

@@ -26,7 +26,7 @@ func TestMultipleMonitorsSimultaneous(t *testing.T) {
 
 	// Create all 5 monitors with mock data
 	processMonitor := NewProcessMonitor(NewMockProgramSet(NewMockReader()), logger)
-	networkMonitor := NewNetworkMonitor(NewMockProgramSet(NewMockReader()), logger)
+	networkMonitor := NewNetworkMonitor(NewMockProgramSet(NewMockReader()), logger, 100, nil, nil)
 	fileMonitor := NewFileMonitor(NewMockProgramSet(NewMockReader()), logger, 100, nil, nil)
 	capabilityMonitor := NewCapabilityMonitor(NewMockProgramSet(NewMockReader()), logger)
 	dnsMonitor := NewDNSMonitor(NewMockProgramSet(NewMockReader()), logger)
@@ -123,7 +123,7 @@ func TestEnrichedEventTyping(t *testing.T) {
 				EventChan() <-chan *enrichment.EnrichedEvent
 			}, context.CancelFunc) {
 				logger := zaptest.NewLogger(t)
-				monitor := NewNetworkMonitor(NewMockProgramSet(NewMockReader()), logger)
+				monitor := NewNetworkMonitor(NewMockProgramSet(NewMockReader()), logger, 100, nil, nil)
 				ctx, cancel := context.WithCancel(context.Background())
 				monitor.Start(ctx)
 				return monitor, func() {
@@ -514,7 +514,7 @@ func TestTimestampPresence(t *testing.T) {
 		Stop() error
 	}{
 		NewProcessMonitor(NewMockProgramSet(NewMockReader()), logger),
-		NewNetworkMonitor(NewMockProgramSet(NewMockReader()), logger),
+		NewNetworkMonitor(NewMockProgramSet(NewMockReader()), logger, 100, nil, nil),
 		NewFileMonitor(NewMockProgramSet(NewMockReader()), logger, 100, nil, nil),
 		NewCapabilityMonitor(NewMockProgramSet(NewMockReader()), logger),
 		NewDNSMonitor(NewMockProgramSet(NewMockReader()), logger),

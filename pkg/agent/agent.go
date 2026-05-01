@@ -193,12 +193,15 @@ func NewAgent(config *Config) (*Agent, error) {
 
 	// Initialize enricher
 	// ANCHOR: pass file path filter to enricher - Feature: file path watch/ignore - May 1, 2026
+	// ANCHOR: pass protocol filter to enricher - Feature: network protocol filter - May 1, 2026
 	enricher, err := enrichment.NewEnricher(
 		agent.K8sClient,
 		config.Agent.ClusterID,
 		config.Agent.NodeName,
 		config.Agent.EBPF.File.WatchPaths,
 		config.Agent.EBPF.File.IgnorePaths,
+		config.Agent.EBPF.Network.AllowProtocols,
+		config.Agent.EBPF.Network.IgnoreProtocols,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create enricher: %w", err)
@@ -349,7 +352,22 @@ func (a *Agent) Start(ctx context.Context) error {
 			a.ProcessMonitor = ebpf.NewProcessMonitor(collection.Process, a.Logger)
 		}
 		if a.Config.Agent.EBPF.Network.Enabled && collection.Network != nil {
-			a.NetworkMonitor = ebpf.NewNetworkMonitor(collection.Network, a.Logger)
+			// ANCHOR: pass buffer_size and protocol filter to NetworkMonitor - Feature: network protocol filter - May 1, 2026
+			a.NetworkMonitor = ebpf.NewNetworkMonitor(
+				collection.Network,
+				a.Logger,
+				a.Config.Agent.EBPF.Network.BufferSize,
+				a.Config.Agent.EBPF.Network.AllowProtocols,
+				a.Config.Agent.EBPF.Network.IgnoreProtocols,
+			)
+			// ANCHOR: network filter startup log - Feature: network protocol filter - May 1, 2026
+			// Logged at INFO so operators can always confirm the active filter config
+			// without enabling debug mode. Empty slice means "no filter on that side".
+			a.Logger.Info("network monitor initialized",
+				zap.Int("channel_size", a.Config.Agent.EBPF.Network.BufferSize),
+				zap.Strings("allow_protocols", a.Config.Agent.EBPF.Network.AllowProtocols),
+				zap.Strings("ignore_protocols", a.Config.Agent.EBPF.Network.IgnoreProtocols),
+			)
 		}
 		if a.Config.Agent.EBPF.DNS.Enabled && collection.DNS != nil {
 			a.DNSMonitor = ebpf.NewDNSMonitor(collection.DNS, a.Logger)
@@ -362,6 +380,11 @@ func (a *Agent) Start(ctx context.Context) error {
 				a.Config.Agent.EBPF.File.BufferSize,
 				a.Config.Agent.EBPF.File.WatchPaths,
 				a.Config.Agent.EBPF.File.IgnorePaths,
+			)
+			a.Logger.Info("file monitor initialized",
+				zap.Int("channel_size", a.Config.Agent.EBPF.File.BufferSize),
+				zap.Strings("watch_paths", a.Config.Agent.EBPF.File.WatchPaths),
+				zap.Strings("ignore_paths", a.Config.Agent.EBPF.File.IgnorePaths),
 			)
 		}
 		if a.Config.Agent.EBPF.Capability.Enabled && collection.Capability != nil {
@@ -477,10 +500,15 @@ func (a *Agent) handleRuntimeEvent(
 	enrichedEvent, err := enrichFn(ctx, rawEnriched.RawEvent)
 	if err != nil {
 		// ANCHOR: path filter discard - Bug: ErrNoKubernetesContext bypass on kubernetes_only=false - May 1, 2026
-		// ErrFilePathFiltered means the operator explicitly excluded this path via watch_paths/ignore_paths.
-		// Always discard — kubernetes_only=false must not override an explicit path filter.
+		// ErrFilePathFiltered / ErrNetworkProtocolFiltered mean the operator explicitly excluded
+		// this event via watch_paths/ignore_paths or allow_protocols/ignore_protocols.
+		// Always discard — kubernetes_only=false must not override an explicit operator filter.
 		if errors.Is(err, enrichment.ErrFilePathFiltered) {
 			a.Logger.Debug("file event dropped by path filter")
+			return
+		}
+		if errors.Is(err, enrichment.ErrNetworkProtocolFiltered) {
+			a.Logger.Debug("network event dropped by protocol filter")
 			return
 		}
 		// ANCHOR: Discard host events - Filter: K8s-native compliance - Mar 24, 2026
