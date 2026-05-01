@@ -73,7 +73,17 @@ elf-owl/
 │   ├── helm/                    # Helm chart
 │   └── kustomize/               # Kustomize base + overlays
 ├── scripts/                     # Multipass-based setup/test helpers
-└── docs/                        # Installation/usage/reference docs
+└── docs/
+    ├── architecture/            # Per-file reference docs mirroring the source tree
+    ├── compliance/              # CIS control mappings and remediation guides
+    ├── ebpf/                    # eBPF module reference
+    ├── installation/            # Host and VM setup guides
+    ├── migration/               # Migration guides
+    ├── plans/                   # Sprint and phase plans
+    ├── reports/                 # Completion reports and reviews
+    ├── runbooks/                # Operational runbooks and cheat sheets
+    ├── todo/                    # Tracked work items
+    └── usage/                   # Usage and configuration guides
 ```
 
 ---
@@ -171,7 +181,9 @@ go mod download
 go build -mod=mod -o elf-owl ./cmd/elf-owl
 ```
 
-See `SETUP_LINUX.md` for full host setup including eBPF kernel requirements.
+See [`SETUP_LINUX.md`](docs/runbooks/SETUP_LINUX.md) for full host setup including eBPF kernel requirements.
+
+For per-file architecture reference see [`docs/architecture/`](docs/architecture/README.md).
 
 ---
 
