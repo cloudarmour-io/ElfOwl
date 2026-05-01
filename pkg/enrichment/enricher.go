@@ -32,6 +32,12 @@ type Enricher struct {
 	NodeName  string
 	Logger    *zap.Logger
 
+	// ANCHOR: file path filter - Feature: file path watch/ignore - May 1, 2026
+	// watchPaths: if non-empty, only events whose path has one of these prefixes pass.
+	// ignorePaths: events whose path has any of these prefixes are dropped regardless.
+	watchPaths  []string
+	ignorePaths []string
+
 	// ANCHOR: cgroupID to containerID cache - Fix PR-23 #3 /proc race - Mar 25, 2026
 	// CgroupID is captured in kernel at event time (race-free). Used as fallback when
 	// /proc/<pid>/cgroup is unreadable (process already exited).
@@ -68,7 +74,9 @@ func withEnrichmentTimeout(ctx context.Context, timeout time.Duration) (context.
 // NewEnricher creates a new event enricher
 // ANCHOR: Enricher initialization without circular dependency - Dec 26, 2025
 // Pass only needed fields (ClusterID, NodeName) instead of full Config to avoid import cycle
-func NewEnricher(k8sClient *kubernetes.Client, clusterID, nodeName string) (*Enricher, error) {
+// ANCHOR: watchPaths/ignorePaths param - Feature: file path watch/ignore - May 1, 2026
+// Nil slices disable the respective filter (current default behaviour is preserved).
+func NewEnricher(k8sClient *kubernetes.Client, clusterID, nodeName string, watchPaths, ignorePaths []string) (*Enricher, error) {
 	logger, _ := zap.NewProduction()
 
 	enricher := &Enricher{
@@ -76,6 +84,8 @@ func NewEnricher(k8sClient *kubernetes.Client, clusterID, nodeName string) (*Enr
 		ClusterID:              clusterID,
 		NodeName:               nodeName,
 		Logger:                 logger,
+		watchPaths:             watchPaths,
+		ignorePaths:            ignorePaths,
 		cgroupToContainerCache: make(map[uint64]string),
 	}
 
@@ -528,6 +538,33 @@ func isSensitivePath(path string) bool {
 		}
 	}
 	return false
+}
+
+// ANCHOR: filePathAllowed filter - Feature: file path watch/ignore - May 1, 2026
+// Returns false when the path should be dropped:
+//   - watchPaths non-empty and path matches none of them, OR
+//   - ignorePaths non-empty and path matches any of them.
+//
+// Both filters can be active simultaneously; a path must pass both to be kept.
+func (e *Enricher) filePathAllowed(path string) bool {
+	if len(e.watchPaths) > 0 {
+		matched := false
+		for _, p := range e.watchPaths {
+			if path == p || strings.HasPrefix(path, p+"/") {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return false
+		}
+	}
+	for _, p := range e.ignorePaths {
+		if path == p || strings.HasPrefix(path, p+"/") {
+			return false
+		}
+	}
+	return true
 }
 
 var errCgroupInodeMatch = errors.New("cgroup inode match")
@@ -1335,6 +1372,16 @@ func (e *Enricher) EnrichFileEvent(
 	if err != nil {
 		return nil, err
 	}
+
+	// ANCHOR: filePathAllowed early exit - Bug fix: path filter bypassed when kubernetes_only=false - May 1, 2026
+	// Extract path before any enrichment so we can drop the event cheaply if it falls
+	// outside the configured watch_paths / ignore_paths filter.
+	// Returns ErrFilePathFiltered (not ErrNoKubernetesContext) so the agent always discards
+	// the event regardless of the kubernetes_only setting.
+	if !e.filePathAllowed(fieldStringValue(v, "Filename")) {
+		return nil, ErrFilePathFiltered
+	}
+
 	// ANCHOR: File event field extraction - Bug fix: UID/Mode/cmdVal/Sensitive - Apr 29, 2026
 	// FileEvent eBPF struct has no UID field; procUID reads /proc/<pid>/status instead.
 	// procComm reads /proc/<pid>/comm so Process.Command is the binary name, not the accessed path.

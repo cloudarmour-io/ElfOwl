@@ -192,7 +192,14 @@ func NewAgent(config *Config) (*Agent, error) {
 	}
 
 	// Initialize enricher
-	enricher, err := enrichment.NewEnricher(agent.K8sClient, config.Agent.ClusterID, config.Agent.NodeName)
+	// ANCHOR: pass file path filter to enricher - Feature: file path watch/ignore - May 1, 2026
+	enricher, err := enrichment.NewEnricher(
+		agent.K8sClient,
+		config.Agent.ClusterID,
+		config.Agent.NodeName,
+		config.Agent.EBPF.File.WatchPaths,
+		config.Agent.EBPF.File.IgnorePaths,
+	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create enricher: %w", err)
 	}
@@ -348,7 +355,14 @@ func (a *Agent) Start(ctx context.Context) error {
 			a.DNSMonitor = ebpf.NewDNSMonitor(collection.DNS, a.Logger)
 		}
 		if a.Config.Agent.EBPF.File.Enabled && collection.File != nil {
-			a.FileMonitor = ebpf.NewFileMonitor(collection.File, a.Logger)
+			// ANCHOR: pass buffer_size and path filter to FileMonitor - Bug: channel flood when filter runs too late - May 1, 2026
+			a.FileMonitor = ebpf.NewFileMonitor(
+				collection.File,
+				a.Logger,
+				a.Config.Agent.EBPF.File.BufferSize,
+				a.Config.Agent.EBPF.File.WatchPaths,
+				a.Config.Agent.EBPF.File.IgnorePaths,
+			)
 		}
 		if a.Config.Agent.EBPF.Capability.Enabled && collection.Capability != nil {
 			a.CapabilityMonitor = ebpf.NewCapabilityMonitor(collection.Capability, a.Logger)
@@ -462,6 +476,13 @@ func (a *Agent) handleRuntimeEvent(
 
 	enrichedEvent, err := enrichFn(ctx, rawEnriched.RawEvent)
 	if err != nil {
+		// ANCHOR: path filter discard - Bug: ErrNoKubernetesContext bypass on kubernetes_only=false - May 1, 2026
+		// ErrFilePathFiltered means the operator explicitly excluded this path via watch_paths/ignore_paths.
+		// Always discard — kubernetes_only=false must not override an explicit path filter.
+		if errors.Is(err, enrichment.ErrFilePathFiltered) {
+			a.Logger.Debug("file event dropped by path filter")
+			return
+		}
 		// ANCHOR: Discard host events - Filter: K8s-native compliance - Mar 24, 2026
 		// ErrNoKubernetesContext = PID has no pod association.
 		// Honour kubernetes_only config: discard (true) or fall through to partial (false).

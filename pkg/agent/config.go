@@ -94,7 +94,7 @@ type EBPFConfig struct {
 	Process       EBPFMonitorConfig `yaml:"process"`
 	Network       EBPFMonitorConfig `yaml:"network"`
 	DNS           EBPFMonitorConfig `yaml:"dns"`
-	File          EBPFMonitorConfig `yaml:"file"`
+	File          EBPFFileConfig    `yaml:"file"`
 	Capability    EBPFMonitorConfig `yaml:"capability"`
 	TLS           EBPFMonitorConfig `yaml:"tls"`
 	PerfBuffer    PerfBufferConfig  `yaml:"perf_buffer"`
@@ -106,6 +106,18 @@ type EBPFMonitorConfig struct {
 	Enabled    bool          `yaml:"enabled"`
 	BufferSize int           `yaml:"buffer_size"`
 	Timeout    time.Duration `yaml:"timeout"`
+}
+
+// ANCHOR: EBPFFileConfig path filter - Feature: file path watch/ignore - May 1, 2026
+// Extends the base monitor config with per-prefix allowlist and denylist.
+// WatchPaths empty = monitor all paths. IgnorePaths empty = ignore no paths.
+// When both are set, a path must satisfy WatchPaths AND not satisfy IgnorePaths.
+type EBPFFileConfig struct {
+	Enabled     bool          `yaml:"enabled"`
+	BufferSize  int           `yaml:"buffer_size"`
+	Timeout     time.Duration `yaml:"timeout"`
+	WatchPaths  []string      `yaml:"watch_paths"`
+	IgnorePaths []string      `yaml:"ignore_paths"`
 }
 
 // PerfBufferConfig defines perf buffer settings for event streaming
@@ -427,7 +439,7 @@ func DefaultConfig() *Config {
 					BufferSize: 4096,
 					Timeout:    5 * time.Second,
 				},
-				File: EBPFMonitorConfig{
+				File: EBPFFileConfig{
 					Enabled:    true,
 					BufferSize: 8192,
 					Timeout:    5 * time.Second,
@@ -444,7 +456,7 @@ func DefaultConfig() *Config {
 				},
 				PerfBuffer: PerfBufferConfig{
 					Enabled:     true,
-					PageCount:   64,
+					PageCount:   256,
 					LostHandler: true,
 				},
 				RingBuffer: RingBufferConfig{
