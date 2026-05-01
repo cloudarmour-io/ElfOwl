@@ -34,7 +34,7 @@ func TestMonitorInitialization(t *testing.T) {
 		},
 		{
 			name:    "NetworkMonitor",
-			monitor: NewNetworkMonitor(programSet, logger),
+			monitor: NewNetworkMonitor(programSet, logger, 100, nil, nil),
 		},
 		{
 			name:    "FileMonitor",
@@ -82,7 +82,7 @@ func TestMonitorNilProgramSetHandling(t *testing.T) {
 
 	// Test NetworkMonitor with nil ProgramSet
 	t.Run("NetworkMonitor with nil ProgramSet", func(t *testing.T) {
-		monitor := NewNetworkMonitor(nil, logger)
+		monitor := NewNetworkMonitor(nil, logger, 100, nil, nil)
 		err := monitor.Start(ctx)
 		if err == nil {
 			t.Fatal("expected error for nil ProgramSet")
@@ -527,7 +527,7 @@ func TestMonitorResourceCleanup(t *testing.T) {
 		Stop() error
 	}{
 		NewProcessMonitor(NewMockProgramSet(NewMockReader()), logger),
-		NewNetworkMonitor(NewMockProgramSet(NewMockReader()), logger),
+		NewNetworkMonitor(NewMockProgramSet(NewMockReader()), logger, 100, nil, nil),
 		NewFileMonitor(NewMockProgramSet(NewMockReader()), logger, 100, nil, nil),
 		NewCapabilityMonitor(NewMockProgramSet(NewMockReader()), logger),
 		NewDNSMonitor(NewMockProgramSet(NewMockReader()), logger),

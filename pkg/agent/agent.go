@@ -352,7 +352,14 @@ func (a *Agent) Start(ctx context.Context) error {
 			a.ProcessMonitor = ebpf.NewProcessMonitor(collection.Process, a.Logger)
 		}
 		if a.Config.Agent.EBPF.Network.Enabled && collection.Network != nil {
-			a.NetworkMonitor = ebpf.NewNetworkMonitor(collection.Network, a.Logger)
+			// ANCHOR: pass buffer_size and protocol filter to NetworkMonitor - Feature: network protocol filter - May 1, 2026
+			a.NetworkMonitor = ebpf.NewNetworkMonitor(
+				collection.Network,
+				a.Logger,
+				a.Config.Agent.EBPF.Network.BufferSize,
+				a.Config.Agent.EBPF.Network.AllowProtocols,
+				a.Config.Agent.EBPF.Network.IgnoreProtocols,
+			)
 		}
 		if a.Config.Agent.EBPF.DNS.Enabled && collection.DNS != nil {
 			a.DNSMonitor = ebpf.NewDNSMonitor(collection.DNS, a.Logger)
