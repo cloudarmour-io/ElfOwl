@@ -51,6 +51,7 @@ agent:
     watch_interval: 0s
 
   rules:
+    file_path: "./config/rules/cis-controls.yaml"
     config_map:
       name: ""
       namespace: ""

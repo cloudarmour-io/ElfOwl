@@ -17,7 +17,8 @@ owl:
   signingKeySecret: "elf-owl-signing-key"
   encryptionKeySecret: "elf-owl-encryption-key"
 
-# Optional rules ConfigMap (defaults to built-in CIS rules)
+# Optional rules ConfigMap API source for live reloads.
+# The canonical CIS rules file is mounted into the pod regardless.
 rules:
   configMap:
     enabled: false

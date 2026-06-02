@@ -71,6 +71,7 @@ agent:
 
   # Rule engine configuration
   rules:
+    file_path: "./config/rules/cis-controls.yaml"
     config_map:
       name: "elf-owl-rules"
       namespace: "elf-owl-system"

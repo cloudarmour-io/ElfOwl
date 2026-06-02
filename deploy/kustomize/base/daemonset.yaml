@@ -92,6 +92,10 @@ spec:
             - name: config
               mountPath: /etc/elf-owl
               readOnly: true
+            - name: rules
+              mountPath: /etc/elf-owl/cis-controls.yaml
+              subPath: rules.yaml
+              readOnly: true
             - name: debugfs
               mountPath: /sys/kernel/debug
               readOnly: true
@@ -111,6 +115,9 @@ spec:
         - name: config
           configMap:
             name: elf-owl-config
+        - name: rules
+          configMap:
+            name: elf-owl-rules
         - name: debugfs
           hostPath:
             path: /sys/kernel/debug

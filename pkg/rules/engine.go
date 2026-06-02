@@ -704,5 +704,14 @@ func contains(slice []string, item string) bool {
 // loadCISRules loads all CIS Kubernetes v1.8 control rules
 // ANCHOR: Load CIS rules from in-repo mappings - Dec 26, 2025
 func loadCISRules() []*Rule {
+	defaultRulePaths := []string{
+		"./config/rules/cis-controls.yaml",
+		"/etc/elf-owl/cis-controls.yaml",
+	}
+	for _, path := range defaultRulePaths {
+		if loadedRules, err := LoadRulesFromFile(path); err == nil && len(loadedRules) > 0 {
+			return loadedRules
+		}
+	}
 	return CISControls
 }

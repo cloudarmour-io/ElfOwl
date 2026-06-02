@@ -7,8 +7,5 @@ kind: Kustomization
 bases:
   - ../../base
 
-resources:
-  - ../../base/configmap-rules.yaml
-
 patchesStrategicMerge:
   - configmap-patch.yaml
