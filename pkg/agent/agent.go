@@ -51,6 +51,9 @@ type MetricsRecorder interface {
 	RecordEnrichmentError()
 	RecordHostEventDiscarded()
 	RecordK8sLookupFailedDiscarded()
+	RecordPushSuccess()
+	RecordPushFailure()
+	RecordPushLatency(seconds float64)
 	SetEventsBuffered(count int)
 }
 
@@ -867,32 +870,47 @@ func (a *Agent) pushEvents(ctx context.Context) {
 
 	for {
 		select {
-		case <-ticker.C:
-			// Check if buffer is ready to flush
-			if a.EventBuffer.IsFull() || a.EventBuffer.IsStale() {
-				bufferedEvents := a.EventBuffer.Flush()
-				if len(bufferedEvents) > 0 {
-					if a.Config.Agent.OWL.Push.DryRun {
-						a.Logger.Info("dry-run: would push events",
-							zap.Int("count", len(bufferedEvents)),
-						)
-					} else {
-						if err := a.APIClient.PushWithRetry(ctx, bufferedEvents); err != nil {
-							a.Logger.Error("failed to push events", zap.Error(err))
+			case <-ticker.C:
+				// Check if buffer is ready to flush
+				if a.EventBuffer.IsFull() || a.EventBuffer.IsStale() {
+					bufferedEvents := a.EventBuffer.Flush()
+					if len(bufferedEvents) > 0 {
+						if a.Config.Agent.OWL.Push.DryRun {
+							a.Logger.Info("dry-run: would push events",
+								zap.Int("count", len(bufferedEvents)),
+							)
+						} else {
+							startedAt := time.Now()
+							if err := a.APIClient.PushWithRetry(ctx, bufferedEvents); err != nil {
+								a.EventBuffer.RequeueFront(bufferedEvents)
+								a.MetricsRegistry.RecordPushFailure()
+								a.Logger.Error("failed to push events", zap.Error(err))
+							} else {
+								a.MetricsRegistry.RecordPushSuccess()
+								a.MetricsRegistry.RecordPushLatency(time.Since(startedAt).Seconds())
+							}
 						}
 					}
 				}
-			}
 
-		case <-a.done:
-			// Final flush on shutdown
-			bufferedEvents := a.EventBuffer.Flush()
-			if len(bufferedEvents) > 0 {
-				if err := a.APIClient.PushWithRetry(ctx, bufferedEvents); err != nil {
-					a.Logger.Error("failed to push events on shutdown", zap.Error(err))
+			case <-a.done:
+				// Final flush on shutdown
+				bufferedEvents := a.EventBuffer.Flush()
+				if len(bufferedEvents) > 0 {
+					shutdownCtx, cancel := context.WithTimeout(context.Background(), a.Config.Agent.OWL.Retry.MaxBackoff+a.Config.Agent.OWL.Push.BatchTimeout)
+					startedAt := time.Now()
+					err := a.APIClient.PushWithRetry(shutdownCtx, bufferedEvents)
+					cancel()
+					if err != nil {
+						a.EventBuffer.RequeueFront(bufferedEvents)
+						a.MetricsRegistry.RecordPushFailure()
+						a.Logger.Error("failed to push events on shutdown", zap.Error(err))
+					} else {
+						a.MetricsRegistry.RecordPushSuccess()
+						a.MetricsRegistry.RecordPushLatency(time.Since(startedAt).Seconds())
+					}
 				}
-			}
-			return
+				return
 
 		case <-ctx.Done():
 			return

@@ -54,11 +54,26 @@ func (b *Buffer) Flush() []*BufferedEvent {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	events := b.events
+	events := append([]*BufferedEvent(nil), b.events...)
 	b.events = make([]*BufferedEvent, 0, b.maxSize)
 	b.lastFlush = time.Now()
 
 	return events
+}
+
+// RequeueFront prepends previously flushed events back onto the buffer.
+func (b *Buffer) RequeueFront(events []*BufferedEvent) {
+	if len(events) == 0 {
+		return
+	}
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	requeued := make([]*BufferedEvent, 0, len(events)+len(b.events))
+	requeued = append(requeued, events...)
+	requeued = append(requeued, b.events...)
+	b.events = requeued
 }
 
 // IsFull returns true if buffer has reached max size
