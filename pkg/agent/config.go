@@ -247,6 +247,15 @@ type HealthConfig struct {
 	Enabled       bool   `yaml:"enabled"`
 	ListenAddress string `yaml:"listen_address"`
 	Path          string `yaml:"path"`
+	Readiness     ReadinessConfig `yaml:"readiness"`
+}
+
+// ReadinessConfig defines delivery-state readiness thresholds.
+type ReadinessConfig struct {
+	StartupGracePeriod         time.Duration `yaml:"startup_grace_period"`
+	MaxBufferedEvents          int           `yaml:"max_buffered_events"`
+	MaxOldestBufferedEventAge  time.Duration `yaml:"max_oldest_buffered_event_age"`
+	MaxConsecutivePushFailures int64         `yaml:"max_consecutive_push_failures"`
 }
 
 // ANCHOR: Webhook config - Feature: outbound ClickHouse event push - Apr 29, 2026
@@ -426,6 +435,18 @@ func (c *Config) Validate() error {
 	if !c.Agent.Enrichment.KubernetesMetadata && c.Agent.Enrichment.KubernetesOnly {
 		return fmt.Errorf("invalid enrichment config: kubernetes_metadata=false with kubernetes_only=true will discard all events; set kubernetes_only=false to process events without K8s metadata")
 	}
+	if c.Agent.Health.Readiness.MaxBufferedEvents < 0 {
+		return fmt.Errorf("health.readiness.max_buffered_events must be >= 0")
+	}
+	if c.Agent.Health.Readiness.MaxOldestBufferedEventAge < 0 {
+		return fmt.Errorf("health.readiness.max_oldest_buffered_event_age must be >= 0")
+	}
+	if c.Agent.Health.Readiness.MaxConsecutivePushFailures < 0 {
+		return fmt.Errorf("health.readiness.max_consecutive_push_failures must be >= 0")
+	}
+	if c.Agent.Health.Readiness.StartupGracePeriod < 0 {
+		return fmt.Errorf("health.readiness.startup_grace_period must be >= 0")
+	}
 
 	return nil
 }
@@ -560,6 +581,12 @@ func DefaultConfig() *Config {
 				Enabled:       true,
 				ListenAddress: ":9091",
 				Path:          "/health",
+				Readiness: ReadinessConfig{
+					StartupGracePeriod:         2 * time.Minute,
+					MaxBufferedEvents:          1000,
+					MaxOldestBufferedEventAge:  5 * time.Minute,
+					MaxConsecutivePushFailures: 3,
+				},
 			},
 			Webhook: WebhookConfig{
 				Enabled:       false,

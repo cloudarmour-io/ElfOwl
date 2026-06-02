@@ -120,8 +120,14 @@ type HealthStatus struct {
 	EventsProcessed  int64           `json:"events_processed"`
 	ViolationsFound  int64           `json:"violations_found"`
 	BufferedEvents   int             `json:"buffered_events"`
+	OldestBufferedEventAge time.Duration `json:"oldest_buffered_event_age"`
 	LastPushTime     time.Time       `json:"last_push_time"`
+	LastPushAttempt  time.Time       `json:"last_push_attempt"`
+	PushSuccessCount int64           `json:"push_success_count"`
 	PushFailureCount int64           `json:"push_failure_count"`
+	ConsecutivePushFailures int64    `json:"consecutive_push_failures"`
+	Ready            bool            `json:"ready"`
+	Reasons          []string        `json:"reasons,omitempty"`
 	Status           string          `json:"status"`
 }
 
@@ -1187,60 +1193,95 @@ func (a *Agent) Health() HealthStatus {
 		"tls":        a.TLSMonitor != nil,
 	}
 	status := "healthy"
-	if a.RuleEngine == nil || a.APIClient == nil || a.EventBuffer == nil {
+	reasons := make([]string, 0)
+	markDegraded := func(reason string) {
 		status = "degraded"
+		if reason != "" {
+			reasons = append(reasons, reason)
+		}
+	}
+	if a.RuleEngine == nil || a.APIClient == nil || a.EventBuffer == nil {
+		markDegraded("core components are not fully initialized")
 	}
 	if a.Config.Agent.Enrichment.KubernetesMetadata && a.K8sClient == nil {
-		status = "degraded"
+		markDegraded("kubernetes metadata is enabled but kubernetes client is unavailable")
 	}
 	if a.Config.Agent.EBPF.Enabled {
 		if a.Config.Agent.EBPF.Process.Enabled && !monitors["process"] {
-			status = "degraded"
+			markDegraded("process monitor is unavailable")
 		}
 		if a.Config.Agent.EBPF.Network.Enabled && !monitors["network"] {
-			status = "degraded"
+			markDegraded("network monitor is unavailable")
 		}
 		if a.Config.Agent.EBPF.DNS.Enabled && !monitors["dns"] {
-			status = "degraded"
+			markDegraded("dns monitor is unavailable")
 		}
 		if a.Config.Agent.EBPF.File.Enabled && !monitors["file"] {
-			status = "degraded"
+			markDegraded("file monitor is unavailable")
 		}
 		if a.Config.Agent.EBPF.Capability.Enabled && !monitors["capability"] {
-			status = "degraded"
+			markDegraded("capability monitor is unavailable")
 		}
 		if a.Config.Agent.EBPF.TLS.Enabled && !monitors["tls"] {
-			status = "degraded"
+			markDegraded("tls monitor is unavailable")
 		}
 	}
-	if a.Config.Agent.OWL.Push.Enabled && a.APIClient != nil &&
-		a.APIClient.FailureCount() > 0 && a.APIClient.SuccessCount() == 0 {
-		status = "degraded"
-	}
 	if a.Config.Agent.Webhook.Enabled && a.WebhookPusher == nil {
-		status = "degraded"
+		markDegraded("webhook delivery is enabled but the webhook pusher is unavailable")
 	}
 	bufferedEvents := 0
+	oldestBufferedAge := time.Duration(0)
 	if a.EventBuffer != nil {
 		bufferedEvents = a.EventBuffer.Count()
+		oldestBufferedAge = a.EventBuffer.OldestAge()
 	}
 	var lastPushTime time.Time
+	var lastPushAttempt time.Time
 	var pushFailureCount int64
+	var pushSuccessCount int64
+	var consecutiveFailures int64
 	if a.APIClient != nil {
 		lastPushTime = a.APIClient.LastPushTime()
+		lastPushAttempt = a.APIClient.LastAttemptTime()
 		pushFailureCount = a.APIClient.FailureCount()
+		pushSuccessCount = a.APIClient.SuccessCount()
+		consecutiveFailures = a.APIClient.ConsecutiveFailureCount()
+	}
+
+	if a.Config.Agent.OWL.Push.Enabled && a.APIClient != nil && a.EventBuffer != nil {
+		readiness := a.Config.Agent.Health.Readiness
+		if readiness.StartupGracePeriod > 0 && time.Since(a.startTime) > readiness.StartupGracePeriod {
+			if readiness.MaxConsecutivePushFailures > 0 && consecutiveFailures >= readiness.MaxConsecutivePushFailures {
+				markDegraded(fmt.Sprintf("delivery has failed %d times in a row", consecutiveFailures))
+			}
+			if readiness.MaxBufferedEvents > 0 && bufferedEvents > readiness.MaxBufferedEvents {
+				markDegraded(fmt.Sprintf("buffered events %d exceed readiness threshold %d", bufferedEvents, readiness.MaxBufferedEvents))
+			}
+			if readiness.MaxOldestBufferedEventAge > 0 && oldestBufferedAge > readiness.MaxOldestBufferedEventAge {
+				markDegraded(fmt.Sprintf("oldest buffered event age %s exceeds readiness threshold %s", oldestBufferedAge, readiness.MaxOldestBufferedEventAge))
+			}
+			if pushFailureCount > 0 && pushSuccessCount == 0 && bufferedEvents > 0 {
+				markDegraded("delivery has not completed a successful push since startup")
+			}
+		}
 	}
 
 	return HealthStatus{
-		AgentVersion:     "0.1.0",
-		Uptime:           time.Since(a.startTime),
-		Status:           status,
-		EventsProcessed:  eventsProcessed,
-		ViolationsFound:  violationsFound,
-		BufferedEvents:   bufferedEvents,
-		LastPushTime:     lastPushTime,
-		PushFailureCount: pushFailureCount,
-		Monitors:         monitors,
+		AgentVersion:            "0.1.0",
+		Uptime:                  time.Since(a.startTime),
+		Status:                  status,
+		Ready:                   status == "healthy",
+		Reasons:                 reasons,
+		EventsProcessed:         eventsProcessed,
+		ViolationsFound:         violationsFound,
+		BufferedEvents:          bufferedEvents,
+		OldestBufferedEventAge:  oldestBufferedAge,
+		LastPushTime:            lastPushTime,
+		LastPushAttempt:         lastPushAttempt,
+		PushSuccessCount:        pushSuccessCount,
+		PushFailureCount:        pushFailureCount,
+		ConsecutivePushFailures: consecutiveFailures,
+		Monitors:                monitors,
 	}
 }
 
