@@ -1389,6 +1389,12 @@ func (e *Enricher) EnrichTLSEvent(
 	ctx context.Context,
 	rawEvent interface{},
 ) (*EnrichedEvent, error) {
+	if e.K8sClient != nil {
+		var cancel context.CancelFunc
+		ctx, cancel = withEnrichmentTimeout(ctx, enrichmentK8sTimeout)
+		defer cancel()
+	}
+
 	if rawEvent == nil {
 		return nil, fmt.Errorf("nil tls event")
 	}
@@ -1402,10 +1408,14 @@ func (e *Enricher) EnrichTLSEvent(
 	if len(meta) == 0 {
 		return nil, fmt.Errorf("empty tls metadata")
 	}
+	length := int(fieldUintValue(v, "Length"))
+	if length <= 0 || length > len(meta) {
+		length = len(meta)
+	}
 
 	// ANCHOR: TLS enrichment via pkg/ja3 - Refactor: eliminated local JA3 duplication - Apr 29, 2026
 	// Replaced parseTLSClientHelloBytes with ja3.ParseJA3Metadata; SNI now also available here.
-	ja3Meta, err := ja3.ParseJA3Metadata(meta)
+	ja3Meta, err := ja3.ParseJA3Metadata(meta[:length])
 	if err != nil {
 		return nil, err
 	}
@@ -1421,12 +1431,56 @@ func (e *Enricher) EnrichTLSEvent(
 		SNI:            ja3Meta.SNI,
 	}
 
-	return &EnrichedEvent{
+	pidVal := uint32(fieldUintValue(v, "PID"))
+	cgroupIDVal := fieldUintValue(v, "CgroupID")
+	containerID := procContainerID(pidVal)
+	containerCtx := &ContainerContext{
+		ContainerID: containerID,
+	}
+	podMeta, err := e.getPodMetadata(ctx, containerID, cgroupIDVal)
+	if err != nil {
+		return nil, err
+	}
+
+	k8sCtx := &K8sContext{
+		ClusterID: e.ClusterID,
+		NodeName:  e.NodeName,
+	}
+	if podMeta != nil {
+		k8sCtx.Namespace = podMeta.Namespace
+		k8sCtx.PodName = podMeta.Name
+		k8sCtx.PodUID = podMeta.UID
+		k8sCtx.ServiceAccount = podMeta.ServiceAccount
+		k8sCtx.Image = podMeta.Image
+		k8sCtx.ImageRegistry = e.parseImageRegistry(podMeta.Image)
+		k8sCtx.ImageTag = e.parseImageTag(podMeta.Image)
+		k8sCtx.Labels = podMeta.Labels
+		if podMeta.OwnerRef != nil {
+			k8sCtx.OwnerRef = &OwnerReference{
+				Kind: podMeta.OwnerRef.Kind,
+				Name: podMeta.OwnerRef.Name,
+				UID:  podMeta.OwnerRef.UID,
+			}
+		}
+		k8sCtx.AuditLoggingEnabled = podMeta.AuditLoggingEnabled
+		containerCtx.ContainerName = podMeta.ContainerName
+		containerCtx.AllowPrivilegeEscalation = podMeta.AllowPrivilegeEscalation
+		containerCtx.AllowPrivilegeEscalationKnown = true
+		applyPodComplianceFields(containerCtx, podMeta)
+	}
+
+	enriched := &EnrichedEvent{
 		RawEvent:  rawEvent,
 		EventType: "tls_client_hello",
+		Kubernetes: k8sCtx,
+		Container: containerCtx,
 		TLS:       tlsCtx,
 		Timestamp: time.Now(),
-	}, nil
+	}
+	if k8sCtx.PodUID == "" {
+		return enriched, ErrNoKubernetesContext
+	}
+	return enriched, nil
 }
 
 // EnrichFileEvent enriches a cilium/ebpf file event

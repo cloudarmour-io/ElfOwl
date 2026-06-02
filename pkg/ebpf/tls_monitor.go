@@ -41,10 +41,13 @@ type TLSMonitor struct {
 	certCacheMu sync.Mutex
 }
 
-func NewTLSMonitor(programSet *ProgramSet, logger *zap.Logger) *TLSMonitor {
+func NewTLSMonitor(programSet *ProgramSet, logger *zap.Logger, chanSize int) *TLSMonitor {
+	if chanSize <= 0 {
+		chanSize = 100
+	}
 	return &TLSMonitor{
 		programSet: programSet,
-		eventChan:  make(chan *enrichment.EnrichedEvent, 100),
+		eventChan:  make(chan *enrichment.EnrichedEvent, chanSize),
 		logger:     logger,
 		stopChan:   make(chan struct{}),
 		certCache:  make(map[string]*certCacheEntry),

@@ -396,10 +396,10 @@ func (a *Agent) Start(ctx context.Context) error {
 		if a.Config.Agent.EBPF.Capability.Enabled && collection.Capability != nil {
 			a.CapabilityMonitor = ebpf.NewCapabilityMonitor(collection.Capability, a.Logger)
 		}
-		if a.Config.Agent.EBPF.TLS.Enabled && collection.TLS != nil {
-			a.TLSMonitor = ebpf.NewTLSMonitor(collection.TLS, a.Logger)
+			if a.Config.Agent.EBPF.TLS.Enabled && collection.TLS != nil {
+				a.TLSMonitor = ebpf.NewTLSMonitor(collection.TLS, a.Logger, a.Config.Agent.EBPF.TLS.BufferSize)
+			}
 		}
-	}
 
 	// ANCHOR: Start all cilium/ebpf monitors with context - Dec 27, 2025
 	// Each monitor manages its own lifecycle via context cancellation
