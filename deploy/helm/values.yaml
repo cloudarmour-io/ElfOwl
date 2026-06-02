@@ -14,6 +14,8 @@ owl:
   endpoint: "https://api.owl-platform.com"
   # Secret name containing key "api-token"
   apiTokenSecret: "elf-owl-api-token"
+  signingKeySecret: "elf-owl-signing-key"
+  encryptionKeySecret: "elf-owl-encryption-key"
 
 # Optional rules ConfigMap (defaults to built-in CIS rules)
 rules:

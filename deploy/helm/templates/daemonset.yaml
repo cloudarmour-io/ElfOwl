@@ -37,13 +37,19 @@ spec:
           # CAP_SYS_RESOURCE allows raising RLIMIT_MEMLOCK for BPF map memory
           securityContext:
             privileged: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsUser: 0
+            runAsNonRoot: false
+            seccompProfile:
+              type: RuntimeDefault
             capabilities:
+              drop:
+                - ALL
               add:
                 - SYS_ADMIN
                 - SYS_RESOURCE
                 - SYS_PTRACE
-              drop:
-                - NET_RAW
 
           env:
             - name: OWL_CLUSTER_ID
@@ -103,6 +109,14 @@ spec:
             - name: proc
               mountPath: /proc
               readOnly: true
+            - name: signing-key
+              mountPath: /var/run/secrets/elf-owl-signing-key
+              subPath: signing-key
+              readOnly: true
+            - name: encryption-key
+              mountPath: /var/run/secrets/elf-owl-encryption-key
+              subPath: encryption-key
+              readOnly: true
 
       volumes:
         - name: config
@@ -116,3 +130,15 @@ spec:
           hostPath:
             path: /proc
             type: Directory
+        - name: signing-key
+          secret:
+            secretName: {{ .Values.owl.signingKeySecret }}
+            items:
+              - key: signing-key
+                path: signing-key
+        - name: encryption-key
+          secret:
+            secretName: {{ .Values.owl.encryptionKeySecret }}
+            items:
+              - key: encryption-key
+                path: encryption-key

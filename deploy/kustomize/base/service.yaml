@@ -14,7 +14,3 @@ spec:
       port: 9090
       targetPort: 9090
       protocol: TCP
-    - name: health
-      port: 9091
-      targetPort: 9091
-      protocol: TCP
