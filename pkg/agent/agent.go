@@ -230,13 +230,23 @@ func NewAgent(config *Config) (*Agent, error) {
 	agent.Logger.Info("evidence signer and cipher initialized")
 
 	// Initialize event buffer
+	bufferOptions := make([]evidence.BufferOption, 0, 1)
+	if config.Agent.Evidence.Queue.Enabled {
+		bufferOptions = append(bufferOptions, evidence.WithDurableStore(config.Agent.Evidence.Queue.Dir))
+	}
 	agent.EventBuffer = evidence.NewBuffer(
 		config.Agent.OWL.Push.BatchSize,
 		config.Agent.OWL.Push.BatchTimeout,
+		bufferOptions...,
 	)
+	if err := agent.EventBuffer.InitError(); err != nil {
+		return nil, fmt.Errorf("failed to initialize event buffer: %w", err)
+	}
 	agent.Logger.Info("event buffer initialized",
 		zap.Int("batch_size", config.Agent.OWL.Push.BatchSize),
 		zap.Duration("batch_timeout", config.Agent.OWL.Push.BatchTimeout),
+		zap.Bool("durable", config.Agent.Evidence.Queue.Enabled),
+		zap.String("queue_dir", agent.EventBuffer.DurablePath()),
 	)
 
 	// ANCHOR: Build TLS config for Owl API client - Findings Note fix - Feb 18, 2026
@@ -575,7 +585,10 @@ func (a *Agent) handleRuntimeEvent(
 	}
 
 	// Queue for evidence processing
-	a.EventBuffer.Enqueue(enrichedEvent, violations)
+	if err := a.EventBuffer.Enqueue(enrichedEvent, violations); err != nil {
+		a.Logger.Error("failed to enqueue event", zap.Error(err))
+		return
+	}
 	// ANCHOR: Forward to outbound webhook pusher - Feature: ClickHouse event push - Apr 29, 2026
 	if a.WebhookPusher != nil {
 		a.WebhookPusher.Send(enrichedEvent, violations)
@@ -851,7 +864,10 @@ func (a *Agent) handleComplianceEvent(ctx context.Context, event *enrichment.Enr
 		a.MetricsRegistry.RecordViolationsFound(len(violations))
 	}
 
-	a.EventBuffer.Enqueue(event, violations)
+	if err := a.EventBuffer.Enqueue(event, violations); err != nil {
+		a.Logger.Error("failed to enqueue compliance event", zap.Error(err))
+		return
+	}
 	if a.WebhookPusher != nil {
 		a.WebhookPusher.Send(event, violations)
 	}
@@ -890,6 +906,12 @@ func (a *Agent) pushEvents(ctx context.Context) {
 								a.MetricsRegistry.RecordPushFailure()
 								a.Logger.Error("failed to push events", zap.Error(err))
 							} else {
+								if err := a.EventBuffer.Ack(bufferedEvents); err != nil {
+									a.EventBuffer.RequeueFront(bufferedEvents)
+									a.MetricsRegistry.RecordPushFailure()
+									a.Logger.Error("failed to ack pushed events", zap.Error(err))
+									continue
+								}
 								a.MetricsRegistry.RecordPushSuccess()
 								a.MetricsRegistry.RecordPushLatency(time.Since(startedAt).Seconds())
 							}
@@ -910,6 +932,12 @@ func (a *Agent) pushEvents(ctx context.Context) {
 						a.MetricsRegistry.RecordPushFailure()
 						a.Logger.Error("failed to push events on shutdown", zap.Error(err))
 					} else {
+						if err := a.EventBuffer.Ack(bufferedEvents); err != nil {
+							a.EventBuffer.RequeueFront(bufferedEvents)
+							a.MetricsRegistry.RecordPushFailure()
+							a.Logger.Error("failed to ack pushed events on shutdown", zap.Error(err))
+							return
+						}
 						a.MetricsRegistry.RecordPushSuccess()
 						a.MetricsRegistry.RecordPushLatency(time.Since(startedAt).Seconds())
 					}

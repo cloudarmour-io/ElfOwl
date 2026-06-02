@@ -7,6 +7,7 @@ package agent
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -181,6 +182,7 @@ type EnrichmentConfig struct {
 type EvidenceConfig struct {
 	Signing    SigningConfig    `yaml:"signing"`
 	Encryption EncryptionConfig `yaml:"encryption"`
+	Queue      QueueConfig      `yaml:"queue"`
 }
 
 // SigningConfig defines HMAC signing settings
@@ -193,6 +195,12 @@ type SigningConfig struct {
 type EncryptionConfig struct {
 	Enabled   bool   `yaml:"enabled"`
 	Algorithm string `yaml:"algorithm"`
+}
+
+// QueueConfig defines durable queue settings.
+type QueueConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	Dir     string `yaml:"dir"`
 }
 
 // OWLConfig defines Owl SaaS API settings
@@ -392,6 +400,9 @@ func (c *Config) Validate() error {
 	if c.Agent.OWL.Auth.TokenPath == "" {
 		c.Agent.OWL.Auth.TokenPath = "/var/run/secrets/owl-jwt-token"
 	}
+	if c.Agent.Evidence.Queue.Enabled && strings.TrimSpace(c.Agent.Evidence.Queue.Dir) == "" {
+		return fmt.Errorf("evidence.queue.dir is required when evidence.queue.enabled=true")
+	}
 
 	// ANCHOR: Webhook target URL guard - Feature: outbound ClickHouse event push - Apr 29, 2026
 	// An enabled outbound pusher with no target URL would silently drop all events.
@@ -510,6 +521,10 @@ func DefaultConfig() *Config {
 				Encryption: EncryptionConfig{
 					Enabled:   true,
 					Algorithm: "AES-256-GCM",
+				},
+				Queue: QueueConfig{
+					Enabled: true,
+					Dir:     filepath.Join(os.TempDir(), "elf-owl", "queue"),
 				},
 			},
 			OWL: OWLConfig{
