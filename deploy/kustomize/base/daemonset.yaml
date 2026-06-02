@@ -110,6 +110,8 @@ spec:
               mountPath: /var/run/secrets/elf-owl-encryption-key
               subPath: encryption-key
               readOnly: true
+            - name: queue
+              mountPath: /var/lib/elf-owl/queue
 
       volumes:
         - name: config
@@ -138,3 +140,7 @@ spec:
             items:
               - key: encryption-key
                 path: encryption-key
+        - name: queue
+          hostPath:
+            path: /var/lib/elf-owl/queue
+            type: DirectoryOrCreate

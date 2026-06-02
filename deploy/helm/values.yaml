@@ -17,6 +17,15 @@ owl:
   signingKeySecret: "elf-owl-signing-key"
   encryptionKeySecret: "elf-owl-encryption-key"
 
+secrets:
+  create: false
+  apiToken: ""
+  signingKey: ""
+  encryptionKey: ""
+
+storage:
+  queueDir: "/var/lib/elf-owl/queue"
+
 # Optional rules ConfigMap API source for live reloads.
 # The canonical CIS rules file is mounted into the pod regardless.
 rules:
@@ -49,6 +58,11 @@ health:
   enabled: true
   listenAddress: ":9091"
   path: "/health"
+  readiness:
+    startupGracePeriod: "2m"
+    maxBufferedEvents: 1000
+    maxOldestBufferedEventAge: "5m"
+    maxConsecutivePushFailures: 3
 
 # Prometheus metrics server (exposed via Service port 9090)
 metrics:
