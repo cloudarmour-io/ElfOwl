@@ -119,6 +119,7 @@ type HealthStatus struct {
 	Monitors         map[string]bool `json:"monitors"`
 	EventsProcessed  int64           `json:"events_processed"`
 	ViolationsFound  int64           `json:"violations_found"`
+	BufferedEvents   int             `json:"buffered_events"`
 	LastPushTime     time.Time       `json:"last_push_time"`
 	PushFailureCount int64           `json:"push_failure_count"`
 	Status           string          `json:"status"`
@@ -1142,21 +1143,69 @@ func (a *Agent) Health() HealthStatus {
 	violationsFound := a.violationsFound
 	a.metricsMutex.Unlock()
 
+	monitors := map[string]bool{
+		"process":    a.ProcessMonitor != nil,
+		"network":    a.NetworkMonitor != nil,
+		"dns":        a.DNSMonitor != nil,
+		"file":       a.FileMonitor != nil,
+		"capability": a.CapabilityMonitor != nil,
+		"tls":        a.TLSMonitor != nil,
+	}
+	status := "healthy"
+	if a.RuleEngine == nil || a.APIClient == nil || a.EventBuffer == nil {
+		status = "degraded"
+	}
+	if a.Config.Agent.Enrichment.KubernetesMetadata && a.K8sClient == nil {
+		status = "degraded"
+	}
+	if a.Config.Agent.EBPF.Enabled {
+		if a.Config.Agent.EBPF.Process.Enabled && !monitors["process"] {
+			status = "degraded"
+		}
+		if a.Config.Agent.EBPF.Network.Enabled && !monitors["network"] {
+			status = "degraded"
+		}
+		if a.Config.Agent.EBPF.DNS.Enabled && !monitors["dns"] {
+			status = "degraded"
+		}
+		if a.Config.Agent.EBPF.File.Enabled && !monitors["file"] {
+			status = "degraded"
+		}
+		if a.Config.Agent.EBPF.Capability.Enabled && !monitors["capability"] {
+			status = "degraded"
+		}
+		if a.Config.Agent.EBPF.TLS.Enabled && !monitors["tls"] {
+			status = "degraded"
+		}
+	}
+	if a.Config.Agent.OWL.Push.Enabled && a.APIClient != nil &&
+		a.APIClient.FailureCount() > 0 && a.APIClient.SuccessCount() == 0 {
+		status = "degraded"
+	}
+	if a.Config.Agent.Webhook.Enabled && a.WebhookPusher == nil {
+		status = "degraded"
+	}
+	bufferedEvents := 0
+	if a.EventBuffer != nil {
+		bufferedEvents = a.EventBuffer.Count()
+	}
+	var lastPushTime time.Time
+	var pushFailureCount int64
+	if a.APIClient != nil {
+		lastPushTime = a.APIClient.LastPushTime()
+		pushFailureCount = a.APIClient.FailureCount()
+	}
+
 	return HealthStatus{
 		AgentVersion:     "0.1.0",
 		Uptime:           time.Since(a.startTime),
-		Status:           "healthy",
+		Status:           status,
 		EventsProcessed:  eventsProcessed,
 		ViolationsFound:  violationsFound,
-		LastPushTime:     a.APIClient.LastPushTime(),
-		PushFailureCount: a.APIClient.FailureCount(),
-		Monitors: map[string]bool{
-			"process":    a.ProcessMonitor != nil,
-			"network":    a.NetworkMonitor != nil,
-			"dns":        a.DNSMonitor != nil, // DNS monitor now available via cilium/ebpf
-			"file":       a.FileMonitor != nil,
-			"capability": a.CapabilityMonitor != nil,
-		},
+		BufferedEvents:   bufferedEvents,
+		LastPushTime:     lastPushTime,
+		PushFailureCount: pushFailureCount,
+		Monitors:         monitors,
 	}
 }
 
