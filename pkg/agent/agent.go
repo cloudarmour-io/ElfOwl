@@ -279,12 +279,15 @@ func NewAgent(config *Config) (*Agent, error) {
 	// ANCHOR: Outbound webhook pusher init - Feature: ClickHouse event push - Apr 29, 2026
 	// Created here so the pusher is ready before Start() launches the flush goroutine.
 	if config.Agent.Webhook.Enabled {
-		agent.WebhookPusher = NewWebhookPusher(
+		agent.WebhookPusher, err = NewWebhookPusher(
 			config.Agent.Webhook,
 			config.Agent.ClusterID,
 			config.Agent.NodeName,
 			zapLogger,
 		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create webhook pusher: %w", err)
+		}
 		agent.Logger.Info("webhook pusher initialized",
 			zap.String("target", config.Agent.Webhook.TargetURL),
 		)
