@@ -151,7 +151,11 @@ func NewAgent(config *Config) (*Agent, error) {
 	// When kubernetes_metadata is disabled, skip Kubernetes client creation entirely.
 	var k8sClient *kubernetes.Client
 	if config.Agent.Enrichment.KubernetesMetadata {
-		k8sClient, err = kubernetes.NewClient(config.Agent.Kubernetes.InCluster)
+		k8sClient, err = kubernetes.NewClient(
+			config.Agent.Kubernetes.InCluster,
+			kubernetes.WithMetadataCacheTTL(config.Agent.Kubernetes.MetadataCacheTTL),
+			kubernetes.WithInformerResync(config.Agent.Kubernetes.WatchInterval),
+		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create kubernetes client: %w", err)
 		}
@@ -1151,6 +1155,9 @@ func (a *Agent) Stop() error {
 	// Stop() drains the internal channel and flushes any remaining events before returning.
 	if a.WebhookPusher != nil {
 		a.WebhookPusher.Stop()
+	}
+	if a.K8sClient != nil {
+		a.K8sClient.Close()
 	}
 
 	if len(errs) > 0 {
