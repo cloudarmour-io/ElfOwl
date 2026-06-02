@@ -740,7 +740,15 @@ func (e *Enricher) refreshCgroupPodMappings(ctx context.Context, force bool) {
 		return
 	}
 
-	pods, err := e.K8sClient.ListAllPods(ctx)
+	var (
+		pods map[string]*PodMetadata
+		err  error
+	)
+	if strings.TrimSpace(e.NodeName) != "" {
+		pods, err = e.K8sClient.ListNodePods(ctx, e.NodeName)
+	} else {
+		pods, err = e.K8sClient.ListAllPods(ctx)
+	}
 	if err != nil {
 		e.Logger.Debug("failed to refresh cgroup mappings from pod list", zap.Error(err))
 		return
