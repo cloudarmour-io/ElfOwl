@@ -164,6 +164,21 @@ type NetworkContext struct {
 	NamespaceIsolation bool   `json:"namespace_isolation"`
 }
 
+// BareMetalSourceContext captures host and process context for bare-metal/VM/gateway networks
+// ANCHOR: Bare-metal network enrichment - Feature: hostname, process, OS context - Jul 18, 2026
+// Enriches network flows with host metadata, process info, and security context.
+// Used on gateways, bare-metal servers, and VMs without Kubernetes.
+type BareMetalSourceContext struct {
+	Hostname        string `json:"hostname"`                 // Resolved hostname (reverse DNS or local)
+	ProcessName     string `json:"process_name,omitempty"`   // Executable name
+	ProcessPID      uint32 `json:"process_pid,omitempty"`    // Process ID
+	User            string `json:"user,omitempty"`           // Process owner username
+	UID             uint32 `json:"uid,omitempty"`            // Numeric UID
+	GID             uint32 `json:"gid,omitempty"`            // Numeric GID
+	SELinuxContext  string `json:"selinux_context,omitempty"`  // SELinux label
+	SecurityProfile string `json:"security_profile,omitempty"` // AppArmor, SELinux, etc.
+}
+
 // DNSContext captures DNS query metadata from cilium/ebpf events
 type DNSContext struct {
 	QueryName      string   `json:"query_name"`
