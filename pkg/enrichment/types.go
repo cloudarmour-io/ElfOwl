@@ -149,8 +149,12 @@ type NodeMetadata = kubernetes.NodeMetadata
 // ANCHOR: Network and DNS contexts for Phase 1 - Dec 26, 2025
 // Support for network policy and DNS rule matching
 
-// NetworkContext captures network metadata from cilium/ebpf events
+// NetworkContext captures environment-agnostic network metadata
+// ANCHOR: Environment-agnostic network context - Feature: network-behavior-centric core - Jul 18, 2026
+// Minimal, cross-environment fields for network behavior analysis.
+// Optional SourceEnrichment/DestEnrichment holds environment-specific context (K8s pod, bare-metal hostname, etc.)
 type NetworkContext struct {
+	// Core network tuple (environment-agnostic)
 	SourceIP           string `json:"source_ip"`
 	DestinationIP      string `json:"destination_ip"`
 	SourcePort         uint16 `json:"source_port"`
@@ -162,6 +166,32 @@ type NetworkContext struct {
 	IngressRestricted  bool   `json:"ingress_restricted"`
 	EgressRestricted   bool   `json:"egress_restricted"`
 	NamespaceIsolation bool   `json:"namespace_isolation"`
+
+	// Flow tracking (cross-environment)
+	// ANCHOR: Flow-level enrichment - Feature: bidirectional conntrack-style correlation - Jul 18, 2026
+	// FlowID uniquely identifies bidirectional flow (same for src→dst and dst→src events)
+	// FlowStartTime allows calculation of flow duration for anomaly detection (e.g., > 24h tunnel)
+	// BytesIn/BytesOut track per-direction traffic for data exfiltration detection
+	// StateTransition describes state machine progression (NEW_TO_ESTABLISHED, etc.)
+	// IsReversed indicates this event is the reverse direction of an established flow
+	FlowID             string `json:"flow_id,omitempty"`             // hash of canonical flow key
+	FlowStartTime      int64  `json:"flow_start_time,omitempty"`     // Unix timestamp when flow created
+	FlowDuration       int64  `json:"flow_duration_seconds,omitempty"` // derived from now - flow_start_time
+	BytesIn            uint64 `json:"bytes_in,omitempty"`            // bytes received (reverse direction)
+	BytesOut           uint64 `json:"bytes_out,omitempty"`           // bytes sent (forward direction)
+	PacketsIn          uint64 `json:"packets_in,omitempty"`
+	PacketsOut         uint64 `json:"packets_out,omitempty"`
+	StateTransition    string `json:"state_transition,omitempty"`    // e.g., "NEW_TO_ESTABLISHED", "ESTABLISHED_TO_CLOSING"
+	IsReversed         bool   `json:"is_reversed,omitempty"`         // true if reverse direction of flow
+
+	// Optional environment-specific enrichment (populated by active backend)
+	// ANCHOR: Pluggable enrichment context - Feature: environment-agnostic core - Jul 18, 2026
+	// SourceEnrichment/DestEnrichment hold backend-specific context:
+	// - K8s: pod name, namespace, service account, RBAC level
+	// - Bare-metal: hostname, process, user, SELinux context
+	// - Cloud: instance ID, tags, IAM role
+	SourceEnrichment      interface{} `json:"source_enrichment,omitempty"`  // *BareMetalSourceContext or *K8sSourceContext
+	DestinationEnrichment interface{} `json:"dest_enrichment,omitempty"`
 }
 
 // BareMetalSourceContext captures host and process context for bare-metal/VM/gateway networks
@@ -177,6 +207,21 @@ type BareMetalSourceContext struct {
 	GID             uint32 `json:"gid,omitempty"`            // Numeric GID
 	SELinuxContext  string `json:"selinux_context,omitempty"`  // SELinux label
 	SecurityProfile string `json:"security_profile,omitempty"` // AppArmor, SELinux, etc.
+}
+
+// K8sSourceContext captures Kubernetes-specific context for network flows
+// ANCHOR: Kubernetes network enrichment - Feature: optional K8s context - Jul 18, 2026
+// Enriches network flows with pod, service account, RBAC, and network policy context.
+// Used when elf-owl runs as K8s DaemonSet or when monitoring K8s cluster traffic.
+type K8sSourceContext struct {
+	Namespace              string `json:"namespace,omitempty"`
+	PodName                string `json:"pod_name,omitempty"`
+	PodUID                 string `json:"pod_uid,omitempty"`
+	ServiceAccount         string `json:"service_account,omitempty"`
+	Labels                 map[string]string `json:"labels,omitempty"`
+	RBACLevel              int    `json:"rbac_level,omitempty"`
+	RBACEnforced           bool   `json:"rbac_enforced,omitempty"`
+	ServiceAccountTokenAge int64  `json:"service_account_token_age,omitempty"`
 }
 
 // DNSContext captures DNS query metadata from cilium/ebpf events
