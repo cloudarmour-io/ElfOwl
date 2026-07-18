@@ -351,6 +351,35 @@ func LoadConfig() (*Config, error) {
 	return config, nil
 }
 
+// ANCHOR: Load configuration from explicit file path - Feature: command-line config specification - Jul 18, 2026
+// LoadConfigFromFile loads configuration from an explicit file path (e.g., --config flag)
+func LoadConfigFromFile(filePath string) (*Config, error) {
+	// ANCHOR: defaults-first config loading - Apply same pattern as LoadConfig()
+	config := DefaultConfig()
+
+	configData, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read config file %s: %w", filePath, err)
+	}
+
+	// Expand sentinel variables (same security policy as LoadConfig)
+	configData = []byte(expandSentinelVars(string(configData)))
+
+	if err := yaml.Unmarshal(configData, &config); err != nil {
+		return nil, fmt.Errorf("failed to parse config file %s: %w", filePath, err)
+	}
+
+	// Override with environment variables
+	config.applyEnvironmentOverrides()
+
+	// Validate configuration
+	if err := config.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid configuration: %w", err)
+	}
+
+	return config, nil
+}
+
 // applyEnvironmentOverrides applies environment variable overrides to config
 func (c *Config) applyEnvironmentOverrides() {
 	if clusterID := os.Getenv("OWL_CLUSTER_ID"); clusterID != "" {

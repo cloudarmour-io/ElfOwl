@@ -146,10 +146,16 @@ func NewAgent(config *Config) (*Agent, error) {
 	// Monitor instances are now created only after LoadProgramsWithOptions succeeds so
 	// partially initialized placeholder monitors are not kept on the agent instance.
 
-	// ANCHOR: Optional Kubernetes client bootstrap - Feature: monitor-only no-k8s mode - Mar 28, 2026
-	// When kubernetes_metadata is disabled, skip Kubernetes client creation entirely.
+	// ANCHOR: Kubernetes client bootstrap based on enrichment backend - Feature: pluggable enrichment - Jul 18, 2026
+	// Only create K8s client if enrichment backend is "kubernetes" (compliance mode or dual-mode require it)
+	// For bare-metal or disabled backends, skip K8s client creation entirely (no in-cluster config needed)
 	var k8sClient *kubernetes.Client
-	if config.Agent.Enrichment.KubernetesMetadata {
+	backendType := config.Agent.EnrichmentBackend.Type
+	if backendType == "" {
+		backendType = "kubernetes" // Default for backward compatibility
+	}
+
+	if backendType == "kubernetes" {
 		k8sClient, err = kubernetes.NewClient(config.Agent.Kubernetes.InCluster)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create kubernetes client: %w", err)
@@ -158,8 +164,8 @@ func NewAgent(config *Config) (*Agent, error) {
 		agent.Logger.Info("kubernetes client initialized")
 	} else {
 		agent.K8sClient = nil
-		agent.Logger.Warn("kubernetes metadata enrichment disabled; running without Kubernetes client",
-			zap.Bool("kubernetes_only", config.Agent.Enrichment.KubernetesOnly))
+		agent.Logger.Info("kubernetes client skipped for enrichment backend",
+			zap.String("backend", backendType))
 	}
 
 	// Initialize rule engine with configurable rule source
@@ -194,17 +200,8 @@ func NewAgent(config *Config) (*Agent, error) {
 		agent.Logger.Info("rule engine initialized with default hardcoded rules")
 	}
 
-	// ANCHOR: Pluggable enrichment backend selection - Feature: environment-agnostic enrichment - Jul 18, 2026
-	// Selects and initializes enrichment backend based on EnrichmentBackendConfig.Type:
-	// - "bare-metal": For gateways, VMs, and non-Kubernetes networks
-	// - "kubernetes": For Kubernetes cluster deployments (default)
-	// - "disabled": No enrichment (minimal overhead)
-	// Falls back to Kubernetes backend if backend config not specified (backward compatibility)
-	backendType := config.Agent.EnrichmentBackend.Type
-	if backendType == "" {
-		backendType = "kubernetes" // Default to kubernetes for backward compatibility
-	}
-
+	// ANCHOR: Pluggable enrichment backend initialization - Feature: environment-agnostic enrichment - Jul 18, 2026
+	// Backend type already determined above for K8s client creation; now initialize enricher
 	var enricher enrichment.Enricher
 
 	switch backendType {
