@@ -27,6 +27,7 @@ import (
 
 	"github.com/udyansh/elf-owl/pkg/api"
 	"github.com/udyansh/elf-owl/pkg/enrichment"
+	"github.com/udyansh/elf-owl/pkg/enrichment/backends"
 	"github.com/udyansh/elf-owl/pkg/evidence"
 	"github.com/udyansh/elf-owl/pkg/kubernetes"
 	"github.com/udyansh/elf-owl/pkg/logger"
@@ -193,25 +194,73 @@ func NewAgent(config *Config) (*Agent, error) {
 		agent.Logger.Info("rule engine initialized with default hardcoded rules")
 	}
 
-	// Initialize enricher (K8s backend for MVP)
-	// ANCHOR: K8s enricher initialization - Feature: pluggable enrichment - Jul 18, 2026
-	// Using K8s enricher for backward compatibility. Backend selection will be added in Phase 5.
-	// ANCHOR: pass file path filter to enricher - Feature: file path watch/ignore - May 1, 2026
-	// ANCHOR: pass protocol filter to enricher - Feature: network protocol filter - May 1, 2026
-	enricher, err := enrichment.NewK8sEnricher(
-		agent.K8sClient,
-		config.Agent.ClusterID,
-		config.Agent.NodeName,
-		config.Agent.EBPF.File.WatchPaths,
-		config.Agent.EBPF.File.IgnorePaths,
-		config.Agent.EBPF.Network.AllowProtocols,
-		config.Agent.EBPF.Network.IgnoreProtocols,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create enricher: %w", err)
+	// ANCHOR: Pluggable enrichment backend selection - Feature: environment-agnostic enrichment - Jul 18, 2026
+	// Selects and initializes enrichment backend based on EnrichmentBackendConfig.Type:
+	// - "bare-metal": For gateways, VMs, and non-Kubernetes networks
+	// - "kubernetes": For Kubernetes cluster deployments (default)
+	// - "disabled": No enrichment (minimal overhead)
+	// Falls back to Kubernetes backend if backend config not specified (backward compatibility)
+	backendType := config.Agent.EnrichmentBackend.Type
+	if backendType == "" {
+		backendType = "kubernetes" // Default to kubernetes for backward compatibility
 	}
+
+	var enricher enrichment.Enricher
+
+	switch backendType {
+	case "bare-metal":
+		// Initialize bare-metal enricher for non-K8s environments
+		// ANCHOR: Bare-metal enricher initialization - Feature: hostname, process, OS context - Jul 18, 2026
+		// Enables enrichment with hostname resolution, process lookup, and SELinux context on gateways/VMs
+		bareMetalConfig := backends.DefaultBareMetalConfig()
+		bareMetalConfig.ReverseDNS = config.Agent.EnrichmentBackend.BareMetal.ReverseDNS
+		bareMetalConfig.ProcessLookup = config.Agent.EnrichmentBackend.BareMetal.ProcessLookup
+		bareMetalConfig.SELinuxContext = config.Agent.EnrichmentBackend.BareMetal.SELinuxContext
+		bareMetalConfig.HostnameCacheTTL = config.Agent.EnrichmentBackend.BareMetal.HostnameCacheTTL
+		bareMetalConfig.ProcessCacheTTL = config.Agent.EnrichmentBackend.BareMetal.ProcessCacheTTL
+
+		enricher, err = backends.NewBareMetalEnricher(zapLogger, config.Agent.ClusterID, config.Agent.NodeName, bareMetalConfig)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create bare-metal enricher: %w", err)
+		}
+		agent.Logger.Info("bare-metal enricher initialized",
+			zap.Bool("reverse_dns", bareMetalConfig.ReverseDNS),
+			zap.Bool("process_lookup", bareMetalConfig.ProcessLookup),
+			zap.Bool("selinux_context", bareMetalConfig.SELinuxContext),
+		)
+
+	case "kubernetes":
+		// Initialize Kubernetes enricher for K8s cluster deployments
+		// ANCHOR: Kubernetes enricher initialization - Feature: optional K8s context - Jul 18, 2026
+		// Enables enrichment with pod, service account, RBAC, and network policy context
+		// ANCHOR: pass file path filter to enricher - Feature: file path watch/ignore - May 1, 2026
+		// ANCHOR: pass protocol filter to enricher - Feature: network protocol filter - May 1, 2026
+		enricher, err = enrichment.NewK8sEnricher(
+			agent.K8sClient,
+			config.Agent.ClusterID,
+			config.Agent.NodeName,
+			config.Agent.EBPF.File.WatchPaths,
+			config.Agent.EBPF.File.IgnorePaths,
+			config.Agent.EBPF.Network.AllowProtocols,
+			config.Agent.EBPF.Network.IgnoreProtocols,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create kubernetes enricher: %w", err)
+		}
+		agent.Logger.Info("kubernetes enricher initialized")
+
+	case "disabled":
+		// No enrichment - minimal overhead mode
+		// ANCHOR: Disabled enrichment backend - Feature: monitoring without enrichment - Jul 18, 2026
+		// Used for minimal-overhead monitoring on resource-constrained systems
+		enricher = nil
+		agent.Logger.Info("enrichment disabled")
+
+	default:
+		return nil, fmt.Errorf("invalid enrichment backend type: %s (expected bare-metal, kubernetes, or disabled)", backendType)
+	}
+
 	agent.Enricher = enricher
-	agent.Logger.Info("enricher initialized")
 
 	// Initialize evidence signer and cipher
 	signingKey := agent.getSigningKey()

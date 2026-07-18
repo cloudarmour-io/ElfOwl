@@ -7,8 +7,6 @@ package backends
 import (
 	"fmt"
 
-	"go.uber.org/zap"
-
 	"github.com/udyansh/elf-owl/pkg/enrichment"
 	"github.com/udyansh/elf-owl/pkg/kubernetes"
 )
