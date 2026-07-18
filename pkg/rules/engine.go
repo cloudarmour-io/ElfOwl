@@ -18,16 +18,32 @@ import (
 	"github.com/udyansh/elf-owl/pkg/enrichment"
 )
 
-// Engine matches enriched events against CIS control rules
+// ANCHOR: Rule engine modes - Feature: dual-mode network-behavior + compliance - Jul 18, 2026
+// Modes determine which rule sets are evaluated during matching:
+// - RuleModeBehavior: Only network behavior detection rules (DDoS, port scan, data exfil, tunnels)
+// - RuleModeCompliance: Only CIS compliance control rules
+// - RuleModeDual: Both network behavior and compliance rules
+const (
+	RuleModeBehavior   = "network-behavior"
+	RuleModeCompliance = "compliance"
+	RuleModeDual       = "dual"
+)
+
+// ANCHOR: Mode-aware rule engine - Feature: dual-mode network-behavior + compliance - Jul 18, 2026
+// Engine matches enriched events against rules based on configured mode.
+// Mode determines which rule sets are evaluated (network-behavior, compliance, or dual).
 type Engine struct {
 	Rules  []*Rule
 	Logger *zap.Logger
+	Mode   string // "network-behavior", "compliance", or "dual"
 }
 
 // EngineConfig defines configuration for rule engine initialization
 // ANCHOR: Engine configuration with flexible rule sourcing - Phase 3.2 Week 3
 // Supports loading rules from file, ConfigMap, or hardcoded defaults
 // Implements fallback chain: file → ConfigMap → hardcoded CISControls
+// ANCHOR: Mode-aware engine configuration - Feature: dual-mode network-behavior + compliance - Jul 18, 2026
+// Mode field controls which rule sets are evaluated (network-behavior, compliance, dual)
 type EngineConfig struct {
 	RuleFilePath       string                // Path to YAML rules file
 	ConfigMapName      string                // Kubernetes ConfigMap name
@@ -36,6 +52,7 @@ type EngineConfig struct {
 	K8sClientset       *kubernetes.Clientset // K8s client for ConfigMap API access
 	Ctx                context.Context       // Context for K8s API calls
 	StrictSource       bool                  // When true, do not fall back to alternate sources on load errors
+	Mode               string                // Rule mode: "network-behavior", "compliance", or "dual"
 }
 
 // Rule defines a CIS control detection rule
@@ -73,6 +90,8 @@ type Violation struct {
 // Fallback chain: file (if provided) → hardcoded CISControls
 // Backward compatible with old signature: NewEngine(filePath...string)
 // New signature: NewEngine() uses default config, or NewEngineWithConfig() for advanced options
+// ANCHOR: Mode-aware engine initialization - Feature: dual-mode network-behavior + compliance - Jul 18, 2026
+// Defaults to compliance mode for backward compatibility. Use NewEngineWithMode for explicit control.
 func NewEngine(ruleFilePath ...string) (*Engine, error) {
 	logger, _ := zap.NewProduction()
 
@@ -101,6 +120,51 @@ func NewEngine(ruleFilePath ...string) (*Engine, error) {
 	engine := &Engine{
 		Rules:  rules,
 		Logger: logger,
+		Mode:   RuleModeCompliance, // Default to compliance for backward compatibility
+	}
+	prepareRuleCaches(engine.Rules, logger)
+
+	return engine, nil
+}
+
+// NewEngineWithMode creates a new rule engine with explicit mode selection
+// ANCHOR: Mode-explicit engine initialization - Feature: dual-mode network-behavior + compliance - Jul 18, 2026
+// Loads rules based on mode:
+// - RuleModeBehavior: Only network behavior detection rules
+// - RuleModeCompliance: Only CIS compliance rules
+// - RuleModeDual: Both network behavior and compliance rules (combined)
+func NewEngineWithMode(mode string) (*Engine, error) {
+	logger, _ := zap.NewProduction()
+
+	var rules []*Rule
+
+	switch mode {
+	case RuleModeBehavior:
+		rules = NetworkBehavior
+		logger.Info("initialized rule engine in network-behavior mode",
+			zap.Int("rule_count", len(rules)))
+	case RuleModeCompliance:
+		rules = loadCISRules()
+		logger.Info("initialized rule engine in compliance mode",
+			zap.Int("rule_count", len(rules)))
+	case RuleModeDual:
+		// Combine both network behavior and compliance rules
+		rules = make([]*Rule, 0, len(NetworkBehavior)+len(loadCISRules()))
+		rules = append(rules, NetworkBehavior...)
+		rules = append(rules, loadCISRules()...)
+		logger.Info("initialized rule engine in dual mode",
+			zap.Int("behavior_rules", len(NetworkBehavior)),
+			zap.Int("compliance_rules", len(loadCISRules())),
+			zap.Int("total_rules", len(rules)))
+	default:
+		return nil, fmt.Errorf("invalid rule mode: %s (expected %q, %q, or %q)",
+			mode, RuleModeBehavior, RuleModeCompliance, RuleModeDual)
+	}
+
+	engine := &Engine{
+		Rules:  rules,
+		Logger: logger,
+		Mode:   mode,
 	}
 	prepareRuleCaches(engine.Rules, logger)
 
@@ -201,13 +265,22 @@ func NewEngineWithConfig(config *EngineConfig) (*Engine, error) {
 		ruleSource = "hardcoded"
 	}
 
+	// Default to compliance mode if not specified
+	mode := config.Mode
+	if mode == "" {
+		mode = RuleModeCompliance
+	}
+
 	engine := &Engine{
 		Rules:  rules,
 		Logger: logger,
+		Mode:   mode,
 	}
 	prepareRuleCaches(engine.Rules, logger)
 
-	logger.Info("rule engine initialized", zap.String("rule_source", ruleSource))
+	logger.Info("rule engine initialized",
+		zap.String("rule_source", ruleSource),
+		zap.String("mode", mode))
 	return engine, nil
 }
 
