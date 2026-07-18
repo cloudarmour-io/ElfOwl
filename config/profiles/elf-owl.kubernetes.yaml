@@ -1,0 +1,146 @@
+# elf-owl Kubernetes Configuration Profile
+# Optimized for Kubernetes cluster deployments
+# Compliance-centric CIS control validation with full Kubernetes enrichment
+#
+# Features:
+# - CIS Kubernetes v1.8 compliance monitoring (48 automated controls)
+# - Pod security context validation
+# - Network policy enforcement checking
+# - RBAC privilege escalation detection
+# - Service account token age monitoring
+# - Full Kubernetes metadata enrichment
+
+agent:
+  # Cluster identification
+  cluster_id: "${CLUSTER_ID:-kubernetes}"
+  node_name: "${HOSTNAME}"
+
+  # Logging configuration
+  logging:
+    level: "info"
+    format: "json"
+    output: "stdout"
+
+  # ANCHOR: Kubernetes eBPF monitoring - Feature: Kubernetes cluster deployment - Jul 18, 2026
+  # Optimized for Kubernetes clusters with comprehensive monitoring
+  # All event types enabled for CIS control validation
+  ebpf:
+    enabled: true
+    kernel_btf_path: ""
+    process:
+      enabled: true  # Track process execution for CIS control violation detection
+      buffer_size: 16384
+      timeout: 5s
+    network:
+      enabled: true  # Network events for CIS 4.6.x network policy checks
+      buffer_size: 16384
+      timeout: 5s
+      allow_protocols: []
+      ignore_protocols: []
+    dns:
+      enabled: true  # DNS queries for network policy evaluation
+      buffer_size: 8192
+      timeout: 5s
+    file:
+      enabled: true  # File operations for CIS 4.1.x read-only filesystem checks
+      buffer_size: 16384
+      timeout: 5s
+      watch_paths: []
+      ignore_paths:
+        - /proc
+        - /sys
+        - /dev
+        - /run
+    capability:
+      enabled: true  # Capability usage for CIS 4.5.x privilege checks
+      buffer_size: 8192
+      timeout: 5s
+    tls:
+      enabled: true  # TLS connections for encrypted traffic analysis
+      buffer_size: 8192
+      timeout: 5s
+    perf_buffer:
+      enabled: true
+      page_count: 512  # Moderate buffer for K8s clusters
+      lost_handler: true
+    ring_buffer:
+      enabled: false
+      size: 65536
+
+  # ANCHOR: Kubernetes integration enabled - Feature: Kubernetes cluster deployment - Jul 18, 2026
+  # Full K8s API access required for pod metadata, RBAC, network policies
+  kubernetes:
+    in_cluster: true  # Use pod service account when running as DaemonSet
+    metadata_cache_ttl: 300s  # 5 minute cache for efficiency
+    watch_interval: 30s
+
+  # ANCHOR: Compliance-centric rules for Kubernetes - Feature: CIS Kubernetes control validation - Jul 18, 2026
+  # Rule mode: "compliance" for 48 automated CIS Kubernetes v1.8 controls
+  rules:
+    mode: "compliance"  # K8s focused on CIS compliance
+    config_map:
+      name: "elf-owl-rules"
+      namespace: "elf-owl-system"
+    eval_timeout: 5s
+    log_violations: true  # Log all CIS violations for audit trail
+
+  # ANCHOR: Kubernetes enrichment backend - Feature: full K8s context - Jul 18, 2026
+  # Full Kubernetes enrichment with pod metadata, RBAC, network policies
+  enrichment_backend:
+    type: "kubernetes"
+    kubernetes:
+      in_cluster: true  # Use pod service account
+      kubeconfig: ""    # Leave empty when in_cluster=true
+      metadata_cache_ttl: 300s
+      cgroup_refresh_interval: 30s
+      enrichment_timeout: 2s
+
+  # Evidence signing and encryption
+  evidence:
+    signing:
+      enabled: true
+      algorithm: "HMAC-SHA256"
+    encryption:
+      enabled: true
+      algorithm: "AES-256-GCM"
+
+  # Owl SaaS API configuration
+  owl_api:
+    endpoint: "https://owl-saas.example.com"
+    auth:
+      method: "jwt"
+      token_path: "/var/run/secrets/owl-jwt-token"
+    push:
+      batch_size: 100
+      batch_timeout: 30s
+      enabled: true
+      dry_run: false
+    retry:
+      max_retries: 10
+      initial_backoff: 1s
+      max_backoff: 60s
+      backoff_multiplier: 2.0
+    tls:
+      enabled: false
+      verify: true
+      ca_cert_path: ""
+
+  # Prometheus metrics
+  metrics:
+    enabled: true
+    listen_address: ":9090"
+    path: "/metrics"
+
+  # Health check endpoints
+  health:
+    enabled: true
+    listen_address: ":9091"
+    path: "/health"
+
+  # Webhook configuration for CIS violation delivery
+  webhook:
+    enabled: false
+    target_url: ""  # e.g., http://ingest-svc:8888/events
+    batch_size: 100
+    flush_interval: 5s
+    timeout: 10s

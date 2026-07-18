@@ -1,0 +1,150 @@
+# elf-owl Comprehensive Configuration Profile
+# Dual-mode deployment for maximum security coverage
+# Network behavior anomaly detection + CIS compliance validation
+#
+# Features:
+# - Network behavior detection (DDoS, port scan, data exfil, tunnels)
+# - CIS Kubernetes v1.8 compliance monitoring (48 controls)
+# - Comprehensive visibility: all event types enabled
+# - Full Kubernetes metadata enrichment
+# - Suitable for defense-in-depth security posture
+#
+# Note: This profile uses maximum resources; deploy on high-capacity nodes
+
+agent:
+  # Cluster identification
+  cluster_id: "${CLUSTER_ID:-comprehensive}"
+  node_name: "${HOSTNAME}"
+
+  # Logging configuration
+  logging:
+    level: "info"
+    format: "json"
+    output: "stdout"
+
+  # ANCHOR: Comprehensive eBPF monitoring - Feature: dual-mode deployment - Jul 18, 2026
+  # All eBPF monitors enabled for maximum visibility
+  # Suitable for high-security environments requiring defense-in-depth
+  ebpf:
+    enabled: true
+    kernel_btf_path: ""
+    process:
+      enabled: true  # Track all process execution
+      buffer_size: 32768  # Large buffer for comprehensive monitoring
+      timeout: 5s
+    network:
+      enabled: true  # Network events for both anomaly and compliance detection
+      buffer_size: 32768  # Large buffer for high-volume network monitoring
+      timeout: 5s
+      allow_protocols: []
+      ignore_protocols: []
+    dns:
+      enabled: true  # DNS queries for network behavior and policy analysis
+      buffer_size: 16384
+      timeout: 5s
+    file:
+      enabled: true  # File operations for compliance and behavior analysis
+      buffer_size: 32768
+      timeout: 5s
+      watch_paths: []
+      ignore_paths:
+        - /proc
+        - /sys
+        - /dev
+        - /run
+    capability:
+      enabled: true  # Capability usage for privilege escalation detection
+      buffer_size: 16384
+      timeout: 5s
+    tls:
+      enabled: true  # TLS connections for encrypted traffic analysis
+      buffer_size: 16384
+      timeout: 5s
+    perf_buffer:
+      enabled: true
+      page_count: 2048  # Very large buffer for comprehensive monitoring
+      lost_handler: true
+    ring_buffer:
+      enabled: false
+      size: 65536
+
+  # ANCHOR: Kubernetes integration fully enabled - Feature: comprehensive K8s deployment - Jul 18, 2026
+  # Full K8s API access for pod metadata, RBAC, network policies
+  kubernetes:
+    in_cluster: true  # Use pod service account when running as DaemonSet
+    metadata_cache_ttl: 300s  # 5 minute cache
+    watch_interval: 30s
+
+  # ANCHOR: Dual-mode rules (network + compliance) - Feature: defense-in-depth - Jul 18, 2026
+  # Rule mode: "dual" for both network behavior detection and CIS compliance
+  # Combines:
+  # - Network anomaly detection (DDoS, port scan, data exfil, tunnels)
+  # - CIS Kubernetes v1.8 compliance (48 automated controls)
+  rules:
+    mode: "dual"  # Maximum coverage: network behavior + compliance
+    config_map:
+      name: "elf-owl-rules"
+      namespace: "elf-owl-system"
+    eval_timeout: 5s
+    log_violations: true  # Log all violations (network anomalies + CIS)
+
+  # ANCHOR: Full Kubernetes enrichment - Feature: comprehensive context - Jul 18, 2026
+  # Maximum enrichment with pod metadata, RBAC, network policies
+  enrichment_backend:
+    type: "kubernetes"
+    kubernetes:
+      in_cluster: true  # Use pod service account
+      kubeconfig: ""    # Leave empty when in_cluster=true
+      metadata_cache_ttl: 300s  # 5 minute cache
+      cgroup_refresh_interval: 30s
+      enrichment_timeout: 2s
+
+  # Evidence signing and encryption
+  evidence:
+    signing:
+      enabled: true
+      algorithm: "HMAC-SHA256"
+    encryption:
+      enabled: true
+      algorithm: "AES-256-GCM"
+
+  # Owl SaaS API configuration
+  owl_api:
+    endpoint: "https://owl-saas.example.com"
+    auth:
+      method: "jwt"
+      token_path: "/var/run/secrets/owl-jwt-token"
+    push:
+      batch_size: 200  # Larger batches for comprehensive monitoring
+      batch_timeout: 30s
+      enabled: true
+      dry_run: false
+    retry:
+      max_retries: 10
+      initial_backoff: 1s
+      max_backoff: 60s
+      backoff_multiplier: 2.0
+    tls:
+      enabled: false
+      verify: true
+      ca_cert_path: ""
+
+  # Prometheus metrics
+  metrics:
+    enabled: true
+    listen_address: ":9090"
+    path: "/metrics"
+
+  # Health check endpoints
+  health:
+    enabled: true
+    listen_address: ":9091"
+    path: "/health"
+
+  # Webhook configuration for comprehensive event delivery
+  webhook:
+    enabled: false
+    target_url: ""  # e.g., http://ingest-svc:8888/events
+    batch_size: 200  # Larger batches for comprehensive monitoring
+    flush_interval: 5s
+    timeout: 10s
