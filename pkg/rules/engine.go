@@ -175,6 +175,8 @@ func NewEngineWithMode(mode string) (*Engine, error) {
 // ANCHOR: Advanced engine initialization with file and ConfigMap support - Phase 3.2 Week 3
 // Implements full fallback chain: file → ConfigMap → hardcoded CISControls
 // Allows fine-grained control over rule source selection
+// ANCHOR: Mode-aware engine config initialization - Feature: dual-mode network-behavior + compliance - Jul 18, 2026
+// Uses mode-specific rule loaders with per-mode fallback chains
 func NewEngineWithConfig(config *EngineConfig) (*Engine, error) {
 	// Validate config is not nil
 	if config == nil {
@@ -183,92 +185,65 @@ func NewEngineWithConfig(config *EngineConfig) (*Engine, error) {
 
 	logger, _ := zap.NewProduction()
 
-	// Set default ConfigMap data key if not specified
-	dataKey := config.ConfigMapDataKey
-	if dataKey == "" {
-		dataKey = "rules.yaml"
-	}
-
-	var rules []*Rule
-	var ruleSource string
-
-	// Fallback chain: file → ConfigMap → hardcoded rules
-	if config.RuleFilePath != "" {
-		loadedRules, err := LoadRulesFromFile(config.RuleFilePath)
-		if err != nil {
-			if config.StrictSource {
-				return nil, fmt.Errorf("failed to load rules from file %s: %w", config.RuleFilePath, err)
-			}
-			logger.Warn("failed to load rules from file, trying ConfigMap",
-				zap.String("file", config.RuleFilePath),
-				zap.Error(err))
-
-			// Try ConfigMap as fallback
-			if config.ConfigMapName != "" && config.ConfigMapNamespace != "" && config.K8sClientset != nil {
-				if config.Ctx == nil {
-					config.Ctx = context.Background()
-				}
-				loadedRules, err := LoadRulesFromConfigMap(config.Ctx, config.K8sClientset, config.ConfigMapName, config.ConfigMapNamespace, dataKey)
-				if err != nil {
-					logger.Warn("failed to load rules from ConfigMap, using hardcoded rules",
-						zap.String("configmap", config.ConfigMapName),
-						zap.String("namespace", config.ConfigMapNamespace),
-						zap.Error(err))
-					rules = loadCISRules()
-					ruleSource = "hardcoded"
-				} else {
-					logger.Info("successfully loaded rules from ConfigMap",
-						zap.String("configmap", config.ConfigMapName),
-						zap.String("namespace", config.ConfigMapNamespace),
-						zap.Int("rule_count", len(loadedRules)))
-					rules = loadedRules
-					ruleSource = "configmap"
-				}
-			} else {
-				rules = loadCISRules()
-				ruleSource = "hardcoded"
-			}
-		} else {
-			logger.Info("successfully loaded rules from file",
-				zap.String("file", config.RuleFilePath),
-				zap.Int("rule_count", len(loadedRules)))
-			rules = loadedRules
-			ruleSource = "file"
-		}
-	} else if config.ConfigMapName != "" && config.ConfigMapNamespace != "" && config.K8sClientset != nil {
-		// Try ConfigMap if no file configured
-		if config.Ctx == nil {
-			config.Ctx = context.Background()
-		}
-		loadedRules, err := LoadRulesFromConfigMap(config.Ctx, config.K8sClientset, config.ConfigMapName, config.ConfigMapNamespace, dataKey)
-		if err != nil {
-			if config.StrictSource {
-				return nil, fmt.Errorf("failed to load rules from ConfigMap %s/%s: %w", config.ConfigMapNamespace, config.ConfigMapName, err)
-			}
-			logger.Warn("failed to load rules from ConfigMap, using hardcoded rules",
-				zap.String("configmap", config.ConfigMapName),
-				zap.String("namespace", config.ConfigMapNamespace),
-				zap.Error(err))
-			rules = loadCISRules()
-			ruleSource = "hardcoded"
-		} else {
-			logger.Info("successfully loaded rules from ConfigMap",
-				zap.String("configmap", config.ConfigMapName),
-				zap.String("namespace", config.ConfigMapNamespace),
-				zap.Int("rule_count", len(loadedRules)))
-			rules = loadedRules
-			ruleSource = "configmap"
-		}
-	} else {
-		// No file or ConfigMap configured, use hardcoded rules
-		rules = loadCISRules()
-		ruleSource = "hardcoded"
-	}
-
 	// Default to compliance mode if not specified
 	mode := config.Mode
 	if mode == "" {
 		mode = RuleModeCompliance
+	}
+
+	var rules []*Rule
+	var err error
+
+	// Load rules based on mode using mode-aware loaders with fallback chains
+	if config.Ctx == nil {
+		config.Ctx = context.Background()
+	}
+
+	switch mode {
+	case RuleModeBehavior:
+		rules, err = LoadNetworkBehaviorRules(config.RuleFilePath, config.ConfigMapName, config.ConfigMapNamespace, config.K8sClientset, config.Ctx)
+		if err != nil {
+			if config.StrictSource {
+				return nil, fmt.Errorf("failed to load network behavior rules: %w", err)
+			}
+			logger.Warn("failed to load network behavior rules, using fallback",
+				zap.Error(err))
+		}
+		logger.Info("rule engine initialized in network-behavior mode",
+			zap.Int("rule_count", len(rules)))
+
+	case RuleModeCompliance:
+		rules, err = LoadComplianceRules(config.RuleFilePath, config.ConfigMapName, config.ConfigMapNamespace, config.K8sClientset, config.Ctx)
+		if err != nil {
+			if config.StrictSource {
+				return nil, fmt.Errorf("failed to load compliance rules: %w", err)
+			}
+			logger.Warn("failed to load compliance rules, using fallback",
+				zap.Error(err))
+		}
+		logger.Info("rule engine initialized in compliance mode",
+			zap.Int("rule_count", len(rules)))
+
+	case RuleModeDual:
+		rules, err = LoadDualModeRules(config.RuleFilePath, config.RuleFilePath, config.ConfigMapName, config.ConfigMapName, config.ConfigMapNamespace, config.K8sClientset, config.Ctx)
+		if err != nil {
+			if config.StrictSource {
+				return nil, fmt.Errorf("failed to load dual mode rules: %w", err)
+			}
+			logger.Warn("failed to load dual mode rules, using fallback",
+				zap.Error(err))
+			// Fallback: use both hardcoded sets
+			rules = make([]*Rule, 0, len(NetworkBehavior)+len(CISCompliance))
+			rules = append(rules, NetworkBehavior...)
+			rules = append(rules, CISCompliance...)
+		}
+		logger.Info("rule engine initialized in dual mode",
+			zap.Int("behavior_rules", len(NetworkBehavior)),
+			zap.Int("compliance_rules", len(CISCompliance)),
+			zap.Int("total_rules", len(rules)))
+
+	default:
+		return nil, fmt.Errorf("invalid rule mode: %s", mode)
 	}
 
 	engine := &Engine{
@@ -279,8 +254,8 @@ func NewEngineWithConfig(config *EngineConfig) (*Engine, error) {
 	prepareRuleCaches(engine.Rules, logger)
 
 	logger.Info("rule engine initialized",
-		zap.String("rule_source", ruleSource),
-		zap.String("mode", mode))
+		zap.String("mode", mode),
+		zap.Int("rule_count", len(rules)))
 	return engine, nil
 }
 
