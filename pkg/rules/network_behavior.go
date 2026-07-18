@@ -3,15 +3,13 @@
 // Rules are environment-agnostic: reference only NetworkContext fields, not K8s/host-specific data.
 // Used in network-behavior-centric mode for gateway, firewall, and load balancer deployments.
 
-package behavior
+package rules
 
-import "github.com/udyansh/elf-owl/pkg/rules"
-
-// NetworkBehaviorRules detects common network-level threats and anomalies.
+// NetworkBehavior detects common network-level threats and anomalies.
 // Focuses on flow-based patterns: DDoS floods, port scanning, data exfiltration, tunneling.
 // These rules work across all deployment environments (gateway, bare-metal, VM, K8s).
 
-var NetworkBehaviorRules = []*rules.Rule{
+var NetworkBehavior = []*Rule{
 	// ===== CONNECTION FLOOD DETECTION =====
 
 	// NET_BEHAVIOR_001: DDoS Flood Detection
@@ -20,11 +18,11 @@ var NetworkBehaviorRules = []*rules.Rule{
 	// Pattern: 1000+ NEW connections to single service in 10 seconds.
 	// Used to detect volumetric DDoS attacks on exposed services.
 	{
-		RuleID:     "NET_BEHAVIOR_001",
+		ControlID:     "NET_BEHAVIOR_001",
 		Title:      "DDoS Flood Detected",
 		Severity:   "CRITICAL",
 		EventTypes: []string{"flow_summary"},
-		Conditions: []rules.Condition{
+		Conditions: []Condition{
 			{
 				Field:    "network.state_transition",
 				Operator: "contains",
@@ -41,11 +39,11 @@ var NetworkBehaviorRules = []*rules.Rule{
 	// Pattern: Large outbound transfer in short time window.
 	// Used to detect data theft, backup exfil, or malware spreading.
 	{
-		RuleID:     "NET_BEHAVIOR_002",
+		ControlID:     "NET_BEHAVIOR_002",
 		Title:      "Data Exfiltration Suspected",
 		Severity:   "HIGH",
 		EventTypes: []string{"flow_summary"},
-		Conditions: []rules.Condition{
+		Conditions: []Condition{
 			{
 				Field:    "network.bytes_out",
 				Operator: "greater_than",
@@ -67,11 +65,11 @@ var NetworkBehaviorRules = []*rules.Rule{
 	// Pattern: Unusually persistent bi-directional flow.
 	// Used to detect command & control tunnels, reverse shells, persistence mechanisms.
 	{
-		RuleID:     "NET_BEHAVIOR_003",
+		ControlID:     "NET_BEHAVIOR_003",
 		Title:      "Persistent Tunnel or Long-Lived Connection",
 		Severity:   "MEDIUM",
 		EventTypes: []string{"flow_summary"},
-		Conditions: []rules.Condition{
+		Conditions: []Condition{
 			{
 				Field:    "network.flow_duration_seconds",
 				Operator: "greater_than",
@@ -88,11 +86,11 @@ var NetworkBehaviorRules = []*rules.Rule{
 	// Examples: Non-HTTP on port 80, Non-HTTPS on 443, Non-DNS on 53.
 	// Used to detect encrypted tunnels (DNS exfil, HTTP tunneling, port hopping).
 	{
-		RuleID:     "NET_BEHAVIOR_004",
+		ControlID:     "NET_BEHAVIOR_004",
 		Title:      "Unusual Protocol Combination",
 		Severity:   "MEDIUM",
 		EventTypes: []string{"flow_summary"},
-		Conditions: []rules.Condition{
+		Conditions: []Condition{
 			// Note: Requires context of port→expected protocol mapping from gateway-services.yaml
 			// Current rule engine evaluates single events; aggregate rules (protocol mismatch detection)
 			// deferred to Phase 2 (aggregation engine with flow context).
@@ -107,11 +105,11 @@ var NetworkBehaviorRules = []*rules.Rule{
 	// Pattern: 50+ failed connections (RST/TIMEOUT) in 60 seconds.
 	// Used to detect probing behavior, port scanning, or service unavailability.
 	{
-		RuleID:     "NET_BEHAVIOR_005",
+		ControlID:     "NET_BEHAVIOR_005",
 		Title:      "Rapid Connection Retries Detected",
 		Severity:   "MEDIUM",
 		EventTypes: []string{"flow_summary"},
-		Conditions: []rules.Condition{
+		Conditions: []Condition{
 			{
 				Field:    "network.state_transition",
 				Operator: "contains",

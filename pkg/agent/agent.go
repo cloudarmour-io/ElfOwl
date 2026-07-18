@@ -34,15 +34,11 @@ import (
 	"github.com/udyansh/elf-owl/pkg/rules"
 )
 
-// EnrichmentProvider defines the enricher methods used by agent handlers.
-type EnrichmentProvider interface {
-	EnrichProcessEvent(ctx context.Context, rawEvent interface{}) (*enrichment.EnrichedEvent, error)
-	EnrichNetworkEvent(ctx context.Context, rawEvent interface{}) (*enrichment.EnrichedEvent, error)
-	EnrichDNSEvent(ctx context.Context, rawEvent interface{}) (*enrichment.EnrichedEvent, error)
-	EnrichFileEvent(ctx context.Context, rawEvent interface{}) (*enrichment.EnrichedEvent, error)
-	EnrichCapabilityEvent(ctx context.Context, rawEvent interface{}) (*enrichment.EnrichedEvent, error)
-	EnrichTLSEvent(ctx context.Context, rawEvent interface{}) (*enrichment.EnrichedEvent, error)
-}
+// ANCHOR: Pluggable enrichment provider interface - Feature: environment-agnostic enrichment - Jul 18, 2026
+// Use enrichment.Enricher interface from enricher.go instead of local definition.
+// This enables dynamic backend selection (K8s, bare-metal, cloud) at runtime.
+// Deprecated: Use enrichment.Enricher directly; this type alias is for backward compatibility.
+type EnrichmentProvider = enrichment.Enricher
 
 // MetricsRecorder defines metrics methods used by the agent.
 type MetricsRecorder interface {
@@ -191,10 +187,12 @@ func NewAgent(config *Config) (*Agent, error) {
 		agent.Logger.Info("rule engine initialized with default hardcoded rules")
 	}
 
-	// Initialize enricher
+	// Initialize enricher (K8s backend for MVP)
+	// ANCHOR: K8s enricher initialization - Feature: pluggable enrichment - Jul 18, 2026
+	// Using K8s enricher for backward compatibility. Backend selection will be added in Phase 5.
 	// ANCHOR: pass file path filter to enricher - Feature: file path watch/ignore - May 1, 2026
 	// ANCHOR: pass protocol filter to enricher - Feature: network protocol filter - May 1, 2026
-	enricher, err := enrichment.NewEnricher(
+	enricher, err := enrichment.NewK8sEnricher(
 		agent.K8sClient,
 		config.Agent.ClusterID,
 		config.Agent.NodeName,

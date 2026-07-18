@@ -1,18 +1,11 @@
 // ANCHOR: CIS Kubernetes v1.8 control rule definitions - Dec 26, 2025
 // Defines automated runtime-detectable CIS controls.
-// ANCHOR: Compliance vs behavior rule separation - Feature: dual-mode rule engine - Jul 18, 2026
-// Separated from network behavior rules to enable independent loading based on rule mode.
-// Allows operators to switch between network-behavior-centric and compliance-centric monitoring.
 
-package compliance
+package rules
 
-import "github.com/udyansh/elf-owl/pkg/rules"
+// CISControls contains runtime-detectable CIS Kubernetes controls.
 
-// CISControls contains runtime-detectable CIS Kubernetes v1.8 controls.
-// 48 automated controls covering pod security, container image, resource management,
-// network policy, RBAC, and advanced security contexts.
-
-var CISControls = []*rules.Rule{
+var CISCompliance = []*Rule{
 	// ===== AUTOMATED CONTROLS =====
 
 	// CIS 4.5.1: Minimize the admission of privileged containers
@@ -21,7 +14,7 @@ var CISControls = []*rules.Rule{
 		Title:      "Minimize the admission of privileged containers",
 		Severity:   "CRITICAL",
 		EventTypes: []string{"process_execution", "pod_spec_check"},
-		Conditions: []rules.Condition{
+		Conditions: []Condition{
 			{
 				Field:    "container.security_context.privileged",
 				Operator: "equals",
@@ -36,7 +29,7 @@ var CISControls = []*rules.Rule{
 		Title:      "Ensure containers do not run as root",
 		Severity:   "HIGH",
 		EventTypes: []string{"process_execution"},
-		Conditions: []rules.Condition{
+		Conditions: []Condition{
 			{
 				Field:    "process.uid",
 				Operator: "equals",
@@ -56,7 +49,7 @@ var CISControls = []*rules.Rule{
 		Title:      "Minimize Linux Kernel Capability usage",
 		Severity:   "HIGH",
 		EventTypes: []string{"capability_usage"},
-		Conditions: []rules.Condition{
+		Conditions: []Condition{
 			{
 				Field:    "capability.name",
 				Operator: "in",
@@ -79,7 +72,7 @@ var CISControls = []*rules.Rule{
 		Title:      "Ensure the filesystem is read-only where possible",
 		Severity:   "MEDIUM",
 		EventTypes: []string{"file_access"},
-		Conditions: []rules.Condition{
+		Conditions: []Condition{
 			{
 				Field:    "file.path",
 				Operator: "in",
@@ -97,7 +90,7 @@ var CISControls = []*rules.Rule{
 		Title:      "Ensure ServiceAccount admission controller is enabled",
 		Severity:   "HIGH",
 		EventTypes: []string{"pod_spec_check"},
-		Conditions: []rules.Condition{
+		Conditions: []Condition{
 			{
 				Field:    "kubernetes.service_account",
 				Operator: "equals",
@@ -118,7 +111,7 @@ var CISControls = []*rules.Rule{
 		Title:      "Ensure default deny NetworkPolicy is in place",
 		Severity:   "HIGH",
 		EventTypes: []string{"network_connection", "network_policy_check"},
-		Conditions: []rules.Condition{
+		Conditions: []Condition{
 			{
 				Field:    "kubernetes.has_default_deny_policy",
 				Operator: "not_equals",
@@ -135,7 +128,7 @@ var CISControls = []*rules.Rule{
 		Title:      "Ensure containers run as non-root user",
 		Severity:   "HIGH",
 		EventTypes: []string{"process_execution"},
-		Conditions: []rules.Condition{
+		Conditions: []Condition{
 			{
 				Field:    "container.run_as_root",
 				Operator: "equals",
@@ -150,7 +143,7 @@ var CISControls = []*rules.Rule{
 		Title:      "Minimize allowPrivilegeEscalation",
 		Severity:   "HIGH",
 		EventTypes: []string{"process_execution", "capability_usage"},
-		Conditions: []rules.Condition{
+		Conditions: []Condition{
 			{
 				Field:    "container.allow_privilege_escalation",
 				Operator: "equals",
@@ -165,7 +158,7 @@ var CISControls = []*rules.Rule{
 		Title:      "Ensure hostNetwork is disabled",
 		Severity:   "HIGH",
 		EventTypes: []string{"network_connection"},
-		Conditions: []rules.Condition{
+		Conditions: []Condition{
 			{
 				Field:    "container.host_network",
 				Operator: "equals",
@@ -180,7 +173,7 @@ var CISControls = []*rules.Rule{
 		Title:      "Ensure hostIPC is disabled",
 		Severity:   "HIGH",
 		EventTypes: []string{"process_execution"},
-		Conditions: []rules.Condition{
+		Conditions: []Condition{
 			{
 				Field:    "container.host_ipc",
 				Operator: "equals",
@@ -195,7 +188,7 @@ var CISControls = []*rules.Rule{
 		Title:      "Ensure hostPID is disabled",
 		Severity:   "HIGH",
 		EventTypes: []string{"process_execution"},
-		Conditions: []rules.Condition{
+		Conditions: []Condition{
 			{
 				Field:    "container.host_pid",
 				Operator: "equals",
@@ -210,7 +203,7 @@ var CISControls = []*rules.Rule{
 		Title:      "Ensure containers do not have dangerous capabilities",
 		Severity:   "HIGH",
 		EventTypes: []string{"capability_usage"},
-		Conditions: []rules.Condition{
+		Conditions: []Condition{
 			{
 				Field:    "capability.name",
 				Operator: "in",
@@ -229,7 +222,7 @@ var CISControls = []*rules.Rule{
 		Title:      "Ensure seccomp profile enforcement",
 		Severity:   "MEDIUM",
 		EventTypes: []string{"process_execution"},
-		Conditions: []rules.Condition{
+		Conditions: []Condition{
 			{
 				Field:    "container.seccomp_profile",
 				Operator: "equals",
@@ -244,7 +237,7 @@ var CISControls = []*rules.Rule{
 		Title:      "Ensure AppArmor profile enforcement",
 		Severity:   "MEDIUM",
 		EventTypes: []string{"process_execution"},
-		Conditions: []rules.Condition{
+		Conditions: []Condition{
 			{
 				Field:    "container.apparmor_profile",
 				Operator: "equals",
@@ -261,7 +254,7 @@ var CISControls = []*rules.Rule{
 		Title:      "Ensure container images are from known registries",
 		Severity:   "MEDIUM",
 		EventTypes: []string{"pod_spec_check"},
-		Conditions: []rules.Condition{
+		Conditions: []Condition{
 			{
 				Field:    "kubernetes.image_registry",
 				Operator: "not_in",
@@ -282,7 +275,7 @@ var CISControls = []*rules.Rule{
 		Title:      "Ensure container images do not use 'latest' tag",
 		Severity:   "MEDIUM",
 		EventTypes: []string{"pod_spec_check"},
-		Conditions: []rules.Condition{
+		Conditions: []Condition{
 			{
 				Field:    "kubernetes.image_tag",
 				Operator: "equals",
@@ -297,7 +290,7 @@ var CISControls = []*rules.Rule{
 		Title:      "Ensure image pull policy is Always",
 		Severity:   "MEDIUM",
 		EventTypes: []string{"pod_spec_check"},
-		Conditions: []rules.Condition{
+		Conditions: []Condition{
 			{
 				Field:    "container.image_pull_policy",
 				Operator: "not_equals",
@@ -312,7 +305,7 @@ var CISControls = []*rules.Rule{
 		Title:      "Ensure images are scanned for vulnerabilities",
 		Severity:   "MEDIUM",
 		EventTypes: []string{"pod_spec_check"},
-		Conditions: []rules.Condition{
+		Conditions: []Condition{
 			{
 				Field:    "container.image_scan_status",
 				Operator: "not_equals",
@@ -327,7 +320,7 @@ var CISControls = []*rules.Rule{
 		Title:      "Ensure image registry authentication is required",
 		Severity:   "HIGH",
 		EventTypes: []string{"pod_spec_check"},
-		Conditions: []rules.Condition{
+		Conditions: []Condition{
 			{
 				Field:    "container.image_registry_auth",
 				Operator: "equals",
@@ -342,7 +335,7 @@ var CISControls = []*rules.Rule{
 		Title:      "Ensure image signature verification is enforced",
 		Severity:   "HIGH",
 		EventTypes: []string{"pod_spec_check"},
-		Conditions: []rules.Condition{
+		Conditions: []Condition{
 			{
 				Field:    "container.image_signed",
 				Operator: "equals",
@@ -359,7 +352,7 @@ var CISControls = []*rules.Rule{
 		Title:      "Ensure container memory limit is set",
 		Severity:   "MEDIUM",
 		EventTypes: []string{"pod_spec_check"},
-		Conditions: []rules.Condition{
+		Conditions: []Condition{
 			{
 				Field:    "container.memory_limit",
 				Operator: "equals",
@@ -374,7 +367,7 @@ var CISControls = []*rules.Rule{
 		Title:      "Ensure container CPU limit is set",
 		Severity:   "MEDIUM",
 		EventTypes: []string{"pod_spec_check"},
-		Conditions: []rules.Condition{
+		Conditions: []Condition{
 			{
 				Field:    "container.cpu_limit",
 				Operator: "equals",
@@ -389,7 +382,7 @@ var CISControls = []*rules.Rule{
 		Title:      "Ensure container memory request is set",
 		Severity:   "MEDIUM",
 		EventTypes: []string{"pod_spec_check"},
-		Conditions: []rules.Condition{
+		Conditions: []Condition{
 			{
 				Field:    "container.memory_request",
 				Operator: "equals",
@@ -404,7 +397,7 @@ var CISControls = []*rules.Rule{
 		Title:      "Ensure container CPU request is set",
 		Severity:   "MEDIUM",
 		EventTypes: []string{"pod_spec_check"},
-		Conditions: []rules.Condition{
+		Conditions: []Condition{
 			{
 				Field:    "container.cpu_request",
 				Operator: "equals",
@@ -419,7 +412,7 @@ var CISControls = []*rules.Rule{
 		Title:      "Ensure container storage request is set",
 		Severity:   "LOW",
 		EventTypes: []string{"pod_spec_check"},
-		Conditions: []rules.Condition{
+		Conditions: []Condition{
 			{
 				Field:    "container.storage_request",
 				Operator: "equals",
@@ -436,7 +429,7 @@ var CISControls = []*rules.Rule{
 		Title:      "Ensure ingress traffic is restricted",
 		Severity:   "HIGH",
 		EventTypes: []string{"network_connection"},
-		Conditions: []rules.Condition{
+		Conditions: []Condition{
 			{
 				Field:    "network.ingress_restricted",
 				Operator: "equals",
@@ -451,7 +444,7 @@ var CISControls = []*rules.Rule{
 		Title:      "Ensure egress traffic is restricted",
 		Severity:   "HIGH",
 		EventTypes: []string{"network_connection"},
-		Conditions: []rules.Condition{
+		Conditions: []Condition{
 			{
 				Field:    "network.egress_restricted",
 				Operator: "equals",
@@ -466,7 +459,7 @@ var CISControls = []*rules.Rule{
 		Title:      "Ensure DNS queries are restricted to allowed domains",
 		Severity:   "MEDIUM",
 		EventTypes: []string{"dns_query"},
-		Conditions: []rules.Condition{
+		Conditions: []Condition{
 			{
 				Field:    "dns.query_allowed",
 				Operator: "equals",
@@ -481,7 +474,7 @@ var CISControls = []*rules.Rule{
 		Title:      "Ensure network segmentation is enforced",
 		Severity:   "HIGH",
 		EventTypes: []string{"network_connection"},
-		Conditions: []rules.Condition{
+		Conditions: []Condition{
 			{
 				Field:    "network.namespace_isolation",
 				Operator: "equals",
@@ -498,7 +491,7 @@ var CISControls = []*rules.Rule{
 		Title:      "Ensure cluster admin RBAC is enforced",
 		Severity:   "CRITICAL",
 		EventTypes: []string{"pod_spec_check"},
-		Conditions: []rules.Condition{
+		Conditions: []Condition{
 			{
 				Field:    "kubernetes.rbac_enforced",
 				Operator: "equals",
@@ -513,7 +506,7 @@ var CISControls = []*rules.Rule{
 		Title:      "Ensure minimal RBAC access is granted",
 		Severity:   "HIGH",
 		EventTypes: []string{"pod_spec_check"},
-		Conditions: []rules.Condition{
+		Conditions: []Condition{
 			{
 				Field:    "kubernetes.rbac_level",
 				Operator: "greater_than",
@@ -528,7 +521,7 @@ var CISControls = []*rules.Rule{
 		Title:      "Ensure ServiceAccount token is not auto-mounted",
 		Severity:   "HIGH",
 		EventTypes: []string{"pod_spec_check"},
-		Conditions: []rules.Condition{
+		Conditions: []Condition{
 			{
 				Field:    "kubernetes.automount_service_account_token",
 				Operator: "equals",
@@ -543,7 +536,7 @@ var CISControls = []*rules.Rule{
 		Title:      "Ensure ServiceAccount token is refreshed regularly",
 		Severity:   "MEDIUM",
 		EventTypes: []string{"pod_spec_check"},
-		Conditions: []rules.Condition{
+		Conditions: []Condition{
 			{
 				Field:    "kubernetes.service_account_token_age",
 				Operator: "greater_than",
@@ -558,7 +551,7 @@ var CISControls = []*rules.Rule{
 		Title:      "Ensure default ServiceAccount is not used",
 		Severity:   "HIGH",
 		EventTypes: []string{"pod_spec_check"},
-		Conditions: []rules.Condition{
+		Conditions: []Condition{
 			{
 				Field:    "kubernetes.service_account",
 				Operator: "equals",
@@ -573,7 +566,7 @@ var CISControls = []*rules.Rule{
 		Title:      "Ensure service account permissions are minimal",
 		Severity:   "HIGH",
 		EventTypes: []string{"pod_spec_check"},
-		Conditions: []rules.Condition{
+		Conditions: []Condition{
 			{
 				Field:    "kubernetes.service_account_permissions",
 				Operator: "greater_than",
@@ -588,7 +581,7 @@ var CISControls = []*rules.Rule{
 		Title:      "Ensure RBAC policies are defined for critical operations",
 		Severity:   "HIGH",
 		EventTypes: []string{"pod_spec_check"},
-		Conditions: []rules.Condition{
+		Conditions: []Condition{
 			{
 				Field:    "kubernetes.rbac_policy_defined",
 				Operator: "equals",
@@ -603,7 +596,7 @@ var CISControls = []*rules.Rule{
 		Title:      "Ensure roles have minimal permissions",
 		Severity:   "HIGH",
 		EventTypes: []string{"pod_spec_check"},
-		Conditions: []rules.Condition{
+		Conditions: []Condition{
 			{
 				Field:    "kubernetes.role_permission_count",
 				Operator: "greater_than",
@@ -618,7 +611,7 @@ var CISControls = []*rules.Rule{
 		Title:      "Ensure audit logging is enabled for RBAC changes",
 		Severity:   "HIGH",
 		EventTypes: []string{"pod_spec_check"},
-		Conditions: []rules.Condition{
+		Conditions: []Condition{
 			{
 				Field:    "kubernetes.audit_logging_enabled",
 				Operator: "equals",
@@ -635,7 +628,7 @@ var CISControls = []*rules.Rule{
 		Title:      "Ensure seccomp profiles are enforced",
 		Severity:   "MEDIUM",
 		EventTypes: []string{"pod_spec_check"},
-		Conditions: []rules.Condition{
+		Conditions: []Condition{
 			{
 				Field:    "container.seccomp_profile",
 				Operator: "equals",
@@ -650,7 +643,7 @@ var CISControls = []*rules.Rule{
 		Title:      "Ensure AppArmor profiles are enforced",
 		Severity:   "MEDIUM",
 		EventTypes: []string{"pod_spec_check"},
-		Conditions: []rules.Condition{
+		Conditions: []Condition{
 			{
 				Field:    "container.apparmor_profile",
 				Operator: "equals",
@@ -665,7 +658,7 @@ var CISControls = []*rules.Rule{
 		Title:      "Ensure SELinux context enforcement",
 		Severity:   "MEDIUM",
 		EventTypes: []string{"process_execution"},
-		Conditions: []rules.Condition{
+		Conditions: []Condition{
 			{
 				Field:    "container.selinux_level",
 				Operator: "equals",
@@ -682,7 +675,7 @@ var CISControls = []*rules.Rule{
 		Title:      "Ensure container filesystem is read-only",
 		Severity:   "HIGH",
 		EventTypes: []string{"file_access"},
-		Conditions: []rules.Condition{
+		Conditions: []Condition{
 			{
 				Field:    "container.read_only_filesystem",
 				Operator: "equals",
@@ -697,7 +690,7 @@ var CISControls = []*rules.Rule{
 		Title:      "Ensure sensitive volume types are restricted",
 		Severity:   "HIGH",
 		EventTypes: []string{"pod_spec_check"},
-		Conditions: []rules.Condition{
+		Conditions: []Condition{
 			{
 				Field:    "container.volume_type",
 				Operator: "in",
@@ -716,7 +709,7 @@ var CISControls = []*rules.Rule{
 		Title:      "Ensure container runtime is from approved sources",
 		Severity:   "HIGH",
 		EventTypes: []string{"pod_spec_check"},
-		Conditions: []rules.Condition{
+		Conditions: []Condition{
 			{
 				Field:    "container.runtime",
 				Operator: "not_in",
@@ -734,7 +727,7 @@ var CISControls = []*rules.Rule{
 		Title:      "Ensure container isolation is properly configured",
 		Severity:   "HIGH",
 		EventTypes: []string{"process_execution"},
-		Conditions: []rules.Condition{
+		Conditions: []Condition{
 			{
 				Field:    "container.isolation_level",
 				Operator: "less_than",
@@ -749,7 +742,7 @@ var CISControls = []*rules.Rule{
 		Title:      "Ensure kernel hardening measures are in place",
 		Severity:   "MEDIUM",
 		EventTypes: []string{"process_execution"},
-		Conditions: []rules.Condition{
+		Conditions: []Condition{
 			{
 				Field:    "container.kernel_hardening",
 				Operator: "equals",
@@ -758,3 +751,8 @@ var CISControls = []*rules.Rule{
 		},
 	},
 }
+
+// ANCHOR: Backward compatibility alias - Feature: rule separation - Jul 18, 2026
+// CISControls is kept for backward compatibility with existing code.
+// New code should use CISCompliance directly.
+var CISControls = CISCompliance
