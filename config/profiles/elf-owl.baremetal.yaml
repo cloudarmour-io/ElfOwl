@@ -1,0 +1,134 @@
+# elf-owl Bare-Metal Configuration Profile
+# Optimized for bare-metal server deployments with ample resources
+# Network-behavior-centric anomaly detection with bare-metal enrichment
+#
+# Features:
+# - High-performance flow tracking (1M flows, 512MB limit)
+# - DDoS and data exfiltration detection
+# - Port scan and tunnel detection
+# - Process and hostname enrichment
+# - Longer TTL caches for sustained operations
+
+agent:
+  # Cluster identification
+  cluster_id: "baremetal"
+  node_name: "${HOSTNAME}"
+
+  # Logging configuration
+  logging:
+    level: "info"
+    format: "json"
+    output: "stdout"
+
+  # ANCHOR: Bare-metal eBPF monitoring - Feature: bare-metal server deployment - Jul 18, 2026
+  # Optimized for bare-metal servers with high throughput and ample resources
+  # All monitors enabled for comprehensive network and process visibility
+  ebpf:
+    enabled: true
+    kernel_btf_path: ""
+    process:
+      enabled: true  # Monitor process execution for context
+      buffer_size: 16384
+      timeout: 5s
+    network:
+      enabled: true  # Critical for bare-metal deployments
+      buffer_size: 32768  # Very large buffer for sustained monitoring
+      timeout: 5s
+      allow_protocols: []
+      ignore_protocols: []
+    dns:
+      enabled: true  # Track DNS queries for full context
+      buffer_size: 8192
+      timeout: 5s
+    file:
+      enabled: true  # Monitor file operations for security context
+      buffer_size: 16384
+      timeout: 5s
+    capability:
+      enabled: true  # Track capability usage for privilege analysis
+      buffer_size: 8192
+      timeout: 5s
+    tls:
+      enabled: true  # TLS connection tracking for encrypted traffic
+      buffer_size: 8192
+      timeout: 5s
+    perf_buffer:
+      enabled: true
+      page_count: 1024  # Large buffer for sustained high-throughput
+      lost_handler: true
+    ring_buffer:
+      enabled: false
+      size: 65536
+
+  # Kubernetes integration disabled for bare-metal
+  kubernetes:
+    in_cluster: false
+    metadata_cache_ttl: 300s
+    watch_interval: 30s
+
+  # Network-behavior-centric rules for bare-metal
+  rules:
+    mode: "network-behavior"  # Bare-metal focused on network behavior
+    eval_timeout: 5s
+    log_violations: true
+
+  # ANCHOR: Bare-metal enrichment with extended caching - Feature: sustained bare-metal operation - Jul 18, 2026
+  # Higher resource limits for sustained operation and better cache hit rates
+  enrichment_backend:
+    type: "bare-metal"
+    bare_metal:
+      reverse_dns: true
+      process_lookup: true
+      selinux_context: true  # Enabled for bare-metal security context
+      hostname_cache_ttl: 7200s  # 2 hour DNS cache for sustained ops
+      process_cache_ttl: 600s    # 10 minute /proc cache
+
+  # Evidence signing and encryption
+  evidence:
+    signing:
+      enabled: true
+      algorithm: "HMAC-SHA256"
+    encryption:
+      enabled: true
+      algorithm: "AES-256-GCM"
+
+  # Owl SaaS API configuration
+  owl_api:
+    endpoint: "https://owl-saas.example.com"
+    auth:
+      method: "jwt"
+      token_path: "/var/run/secrets/owl-jwt-token"
+    push:
+      batch_size: 200  # Larger batches for efficient delivery
+      batch_timeout: 30s
+      enabled: true
+      dry_run: false
+    retry:
+      max_retries: 10
+      initial_backoff: 1s
+      max_backoff: 60s
+      backoff_multiplier: 2.0
+    tls:
+      enabled: false
+      verify: true
+      ca_cert_path: ""
+
+  # Prometheus metrics
+  metrics:
+    enabled: true
+    listen_address: ":9090"
+    path: "/metrics"
+
+  # Health check endpoints
+  health:
+    enabled: true
+    listen_address: ":9091"
+    path: "/health"
+
+  # Webhook configuration
+  webhook:
+    enabled: false
+    target_url: ""
+    batch_size: 200  # Larger batches for efficient delivery
+    flush_interval: 5s
+    timeout: 10s

@@ -1,0 +1,133 @@
+# elf-owl VM Configuration Profile
+# Optimized for virtual machine deployments with constrained resources
+# Network-behavior-centric anomaly detection with minimal overhead
+#
+# Features:
+# - Low resource footprint (flow tracking: 100k flows, 64MB limit)
+# - Essential network monitoring only
+# - Efficient caching with short TTLs
+# - Suitable for resource-limited VMs and containers
+
+agent:
+  # Cluster identification
+  cluster_id: "vm"
+  node_name: "${HOSTNAME}"
+
+  # Logging configuration
+  logging:
+    level: "info"
+    format: "json"
+    output: "stdout"
+
+  # ANCHOR: VM eBPF monitoring - Feature: resource-constrained VM deployment - Jul 18, 2026
+  # Optimized for VMs with limited CPU and memory resources
+  # Focus on network events only; all other monitors disabled
+  ebpf:
+    enabled: true
+    kernel_btf_path: ""
+    process:
+      enabled: false  # Disabled to save resources
+      buffer_size: 4096
+      timeout: 5s
+    network:
+      enabled: true  # Essential for all deployments
+      buffer_size: 4096  # Minimal buffer for VM constraints
+      timeout: 5s
+      allow_protocols: []
+      ignore_protocols: []
+    dns:
+      enabled: false  # Disabled to save resources
+      buffer_size: 4096
+      timeout: 5s
+    file:
+      enabled: false  # Disabled to save resources
+      buffer_size: 4096
+      timeout: 5s
+    capability:
+      enabled: false  # Disabled to save resources
+      buffer_size: 4096
+      timeout: 5s
+    tls:
+      enabled: false  # Disabled to save resources
+      buffer_size: 4096
+      timeout: 5s
+    perf_buffer:
+      enabled: true
+      page_count: 64  # Minimal buffer for VM constraints
+      lost_handler: false  # May drop events under extreme load
+    ring_buffer:
+      enabled: false
+      size: 65536
+
+  # Kubernetes integration disabled for VMs
+  kubernetes:
+    in_cluster: false
+    metadata_cache_ttl: 300s
+    watch_interval: 30s
+
+  # Network-behavior-centric rules for VMs
+  rules:
+    mode: "network-behavior"  # VM focused on network behavior
+    eval_timeout: 5s
+    log_violations: true
+
+  # ANCHOR: Minimal bare-metal enrichment for VMs - Feature: resource-constrained operation - Jul 18, 2026
+  # Lightweight enrichment with minimal caching to reduce memory footprint
+  enrichment_backend:
+    type: "bare-metal"
+    bare_metal:
+      reverse_dns: false  # Disabled to save resources
+      process_lookup: false  # Disabled to save resources
+      selinux_context: false  # Disabled to save resources
+      hostname_cache_ttl: 600s   # 10 minute cache (minimal)
+      process_cache_ttl: 120s    # 2 minute cache (minimal)
+
+  # Evidence signing and encryption
+  evidence:
+    signing:
+      enabled: true
+      algorithm: "HMAC-SHA256"
+    encryption:
+      enabled: true
+      algorithm: "AES-256-GCM"
+
+  # Owl SaaS API configuration
+  owl_api:
+    endpoint: "https://owl-saas.example.com"
+    auth:
+      method: "jwt"
+      token_path: "/var/run/secrets/owl-jwt-token"
+    push:
+      batch_size: 50  # Smaller batches for memory efficiency
+      batch_timeout: 30s
+      enabled: true
+      dry_run: false
+    retry:
+      max_retries: 5  # Fewer retries to save bandwidth
+      initial_backoff: 1s
+      max_backoff: 30s
+      backoff_multiplier: 2.0
+    tls:
+      enabled: false
+      verify: true
+      ca_cert_path: ""
+
+  # Prometheus metrics
+  metrics:
+    enabled: true
+    listen_address: ":9090"
+    path: "/metrics"
+
+  # Health check endpoints
+  health:
+    enabled: true
+    listen_address: ":9091"
+    path: "/health"
+
+  # Webhook configuration
+  webhook:
+    enabled: false
+    target_url: ""
+    batch_size: 50  # Smaller batches for memory efficiency
+    flush_interval: 10s  # Less frequent flushes to save resources
+    timeout: 10s
