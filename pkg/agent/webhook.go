@@ -228,8 +228,11 @@ type WebhookEvent struct {
 	File       *enrichment.FileContext       `json:"file,omitempty"`
 	Capability *enrichment.CapabilityContext `json:"capability,omitempty"`
 	TLS        *enrichment.TLSContext        `json:"tls,omitempty"`
-	Violations []ViolationSummary            `json:"violations,omitempty"`
-	Metadata   EventMetadata                 `json:"metadata"`
+	// ANCHOR: Flow summary event field - Feature: flow lifecycle webhook events - Jul 18, 2026
+	// Populated when Type = EventTypeFlowSummary; contains bidirectional flow metrics
+	FlowSummary *FlowSummaryEvent       `json:"flow_summary,omitempty"`
+	Violations  []ViolationSummary      `json:"violations,omitempty"`
+	Metadata    EventMetadata           `json:"metadata"`
 }
 
 // -----------------------------------------------------------------------
@@ -311,6 +314,38 @@ func (p *WebhookPusher) Send(event *enrichment.EnrichedEvent, violations []*rule
 	default:
 		p.logger.Warn("webhook pusher channel full, dropping event",
 			zap.String("type", string(we.Type)),
+		)
+	}
+}
+
+// ANCHOR: Send flow summary event - Feature: flow lifecycle webhook events - Jul 18, 2026
+// Sends a flow summary event directly to the webhook pusher (separate from regular events).
+// Called when a network flow closes (timeout, FIN, RST, or eviction).
+func (p *WebhookPusher) SendFlowSummary(flowEvent *FlowSummaryEvent) {
+	if flowEvent == nil {
+		return
+	}
+
+	// Convert FlowSummaryEvent to a WebhookEvent for consistent transmission
+	we := WebhookEvent{
+		Type:        EventTypeFlowSummary,
+		Timestamp:   flowEvent.Timestamp,
+		ClusterID:   flowEvent.ClusterID,
+		NodeName:    flowEvent.NodeName,
+		FlowSummary: flowEvent,
+		Metadata: EventMetadata{
+			EventID:          newEventID(),
+			Source:           "flow_tracker",
+			ComplianceStatus: "N/A", // Flow events are not compliance violations
+		},
+	}
+
+	select {
+	case p.eventCh <- we:
+	default:
+		p.logger.Warn("webhook pusher channel full, dropping flow summary event",
+			zap.String("flow_key", flowEvent.FlowKey),
+			zap.String("state", flowEvent.State),
 		)
 	}
 }

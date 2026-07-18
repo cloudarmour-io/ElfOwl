@@ -1056,33 +1056,33 @@ func (a *Agent) startFlowSummaryEmitter(ctx context.Context) {
 	for {
 		select {
 		case closedFlow := <-a.FlowTracker.ClosedFlows():
-			// ANCHOR: Emit flow summary event - Feature: flow lifecycle events - Jul 18, 2026
+			// ANCHOR: Emit flow summary event - Feature: flow lifecycle webhook events - Jul 18, 2026
 			// Convert closed FlowRecord to FlowSummaryEvent and push to webhook
 			if closedFlow == nil {
 				continue
 			}
 
-			// Create flow summary event for webhook (to be integrated in Task #14)
-			_ = &FlowSummaryEvent{
-				EventType:      "flow_summary",
-				Timestamp:      time.Now(),
-				ClusterID:      a.Config.Agent.ClusterID,
-				NodeName:       a.Config.Agent.NodeName,
-				FlowKey:        closedFlow.Key.String(),
-				State:          string(closedFlow.State),
-				CreatedAt:      closedFlow.CreatedAt,
-				LastSeenAt:     closedFlow.LastSeenAt,
-				BytesSent:      closedFlow.BytesSent,
-				BytesRecv:      closedFlow.BytesRecv,
-				PacketsSent:    closedFlow.PacketsSent,
-				PacketsRecv:    closedFlow.PacketsRecv,
-				CloseReason:    closedFlow.CloseReason,
-				IsReversed:     closedFlow.IsReversed,
+			// Create flow summary event with all metrics and metadata
+			flowSummary := &FlowSummaryEvent{
+				EventType:   "flow_summary",
+				Timestamp:   time.Now(),
+				ClusterID:   a.Config.Agent.ClusterID,
+				NodeName:    a.Config.Agent.NodeName,
+				FlowKey:     closedFlow.Key.String(),
+				State:       string(closedFlow.State),
+				CreatedAt:   closedFlow.CreatedAt,
+				LastSeenAt:  closedFlow.LastSeenAt,
+				BytesSent:   closedFlow.BytesSent,
+				BytesRecv:   closedFlow.BytesRecv,
+				PacketsSent: closedFlow.PacketsSent,
+				PacketsRecv: closedFlow.PacketsRecv,
+				CloseReason: closedFlow.CloseReason,
+				IsReversed:  closedFlow.IsReversed,
 			}
 
-			// Push to webhook if available (actual event integration in Task #14)
+			// Push flow summary to webhook if available
 			if a.WebhookPusher != nil {
-				a.WebhookPusher.Send(nil, nil)
+				a.WebhookPusher.SendFlowSummary(flowSummary)
 			}
 
 			a.Logger.Debug("flow closed",
