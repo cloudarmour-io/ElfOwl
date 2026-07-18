@@ -619,6 +619,33 @@ func (a *Agent) handleRuntimeEvent(
 		}
 	}
 
+	// ANCHOR: Flow tracking for network events - Feature: bidirectional flow correlation - Jul 18, 2026
+	// After enrichment, correlate network events into bidirectional flows and populate flow fields.
+	if enrichedEvent != nil && enrichedEvent.Network != nil && a.FlowTracker != nil {
+		// Call FlowTracker.AddOrUpdateFlow() to correlate events into bidirectional flows
+		flowKey, isNewFlow, flowState := a.FlowTracker.AddOrUpdateFlow(
+			enrichedEvent.Network.SourceIP,
+			enrichedEvent.Network.DestinationIP,
+			enrichedEvent.Network.SourcePort,
+			enrichedEvent.Network.DestinationPort,
+			enrichedEvent.Network.Protocol,
+			enrichedEvent.Network.NetworkNamespaceID,
+			0, // bytes - will be set to 0 for now (can be extended with packet size in future)
+			network.FlowState(enrichedEvent.Network.ConnectionState), // Map connection state to flow state
+		)
+
+		// Populate flow fields in NetworkContext
+		if flowKey != nil {
+			enrichedEvent.Network.FlowID = flowKey.String()
+			enrichedEvent.Network.IsReversed = false // Will be set by FlowTracker in future phases
+			a.Logger.Debug("flow tracked",
+				zap.String("flow_id", enrichedEvent.Network.FlowID),
+				zap.String("flow_state", string(flowState)),
+				zap.Bool("is_new", isNewFlow),
+			)
+		}
+	}
+
 	ruleEngine := a.getRuleEngine()
 	if ruleEngine == nil {
 		return
@@ -681,6 +708,9 @@ func (a *Agent) handleNetworkEvent(ctx context.Context, rawEnriched *enrichment.
 	// WHY: Network monitor only fills NetworkContext; K8s/container metadata added here.
 	// WHAT: Enrich raw network event with pod metadata and network policy context.
 	// HOW: EnrichNetworkEvent queries K8s API using container ID from /proc cgroup.
+	// ANCHOR: Flow tracking for network events - Feature: bidirectional flow correlation - Jul 18, 2026
+	// After enrichment, correlate network events into bidirectional flows and populate flow fields.
+
 	a.handleRuntimeEvent(
 		ctx,
 		rawEnriched,
@@ -691,6 +721,11 @@ func (a *Agent) handleNetworkEvent(ctx context.Context, rawEnriched *enrichment.
 		"network event enrichment failed, using partial event",
 		false,
 	)
+
+	// Populate flow tracking fields after enrichment completes
+	// This is a placeholder for flow tracking integration - actual implementation will
+	// call FlowTracker.AddOrUpdateFlow() and populate NetworkContext flow fields
+	// TODO(phase5-task12): Integrate FlowTracker.AddOrUpdateFlow() to populate flow fields
 }
 
 func (a *Agent) handleDNSEvent(ctx context.Context, rawEnriched *enrichment.EnrichedEvent) {
