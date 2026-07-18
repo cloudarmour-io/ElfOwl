@@ -37,6 +37,7 @@ const (
 	EventTypeFile       EventType = "file_access"
 	EventTypeCapability EventType = "capability_usage"
 	EventTypeTLS        EventType = "tls_client_hello"
+	EventTypeFlowSummary EventType = "flow_summary" // ANCHOR: Flow summary event type - Feature: flow lifecycle webhook events - Jul 18, 2026
 )
 
 // ViolationSummary is a full violation record embedded in the webhook payload.
@@ -46,6 +47,26 @@ type ViolationSummary struct {
 	Severity       string `json:"severity"`
 	Description    string `json:"description,omitempty"`
 	RemediationRef string `json:"remediation_ref,omitempty"`
+}
+
+// ANCHOR: Flow summary event type - Feature: flow lifecycle webhook events - Jul 18, 2026
+// Emitted when a network flow is closed (timeout, FIN, RST, eviction).
+// Contains bidirectional flow state and traffic metrics for network behavior analysis.
+type FlowSummaryEvent struct {
+	EventType    string    `json:"event_type"`   // "flow_summary"
+	Timestamp    time.Time `json:"timestamp"`
+	ClusterID    string    `json:"cluster_id"`
+	NodeName     string    `json:"node_name"`
+	FlowKey      string    `json:"flow_key"`      // Hash of canonical flow tuple
+	State        string    `json:"state"`         // FlowState (new, established, closing, closed)
+	CreatedAt    time.Time `json:"created_at"`    // When flow was first seen
+	LastSeenAt   time.Time `json:"last_seen_at"`  // When flow last had activity
+	BytesSent    uint64    `json:"bytes_sent"`    // Forward direction bytes
+	BytesRecv    uint64    `json:"bytes_recv"`    // Reverse direction bytes
+	PacketsSent  uint64    `json:"packets_sent"`  // Forward direction packets
+	PacketsRecv  uint64    `json:"packets_recv"`  // Reverse direction packets
+	CloseReason  string    `json:"close_reason"`  // "fin", "reset", "timeout", "evicted"
+	IsReversed   bool      `json:"is_reversed"`   // True if this is reverse direction of flow
 }
 
 // -----------------------------------------------------------------------

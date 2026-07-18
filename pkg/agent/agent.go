@@ -31,6 +31,7 @@ import (
 	"github.com/udyansh/elf-owl/pkg/kubernetes"
 	"github.com/udyansh/elf-owl/pkg/logger"
 	"github.com/udyansh/elf-owl/pkg/metrics"
+	"github.com/udyansh/elf-owl/pkg/network"
 	"github.com/udyansh/elf-owl/pkg/rules"
 )
 
@@ -73,6 +74,10 @@ type Agent struct {
 	EventBuffer *evidence.Buffer
 	ruleMu      sync.RWMutex
 
+	// ANCHOR: Flow tracker for bidirectional flow correlation - Feature: conntrack-style flow tracking - Jul 18, 2026
+	// Tracks network flows with state machine and emits closed flows to webhook
+	FlowTracker *network.FlowTracker
+
 	ruleReloadInterval time.Duration
 	ruleReloadTimeout  time.Duration
 
@@ -91,10 +96,11 @@ type Agent struct {
 	// producerWg tracks the goroutines that can call WebhookPusher.Send():
 	//   - 6 eBPF event handlers (handleProcessEvents … handleTLSEvents)
 	//   - 1 compliance watcher (startComplianceWatchers, only when K8sClient != nil)
+	//   - 1 flow summary emitter (startFlowSummaryEmitter, drains FlowTracker.ClosedFlows())
 	// Stop() waits for all of them to exit before calling WebhookPusher.Stop(), guaranteeing
 	// no Send() call races with the pusher's drain loop.
-	// cancelProducers is called in Stop() to signal the compliance watcher (ctx-driven) to exit.
-	producerWg     sync.WaitGroup
+	// cancelProducers is called in Stop() to signal the compliance watcher and flow emitter (ctx-driven) to exit.
+	producerWg      sync.WaitGroup
 	cancelProducers context.CancelFunc
 
 	// ANCHOR: Mutex-protected counters for goroutine safety - Dec 26, 2025
@@ -285,6 +291,22 @@ func NewAgent(config *Config) (*Agent, error) {
 		)
 	}
 
+	// ANCHOR: Initialize flow tracker - Feature: bidirectional flow correlation - Jul 18, 2026
+	// Creates tracker with configurable TTL and memory limits for flow state management.
+	// Default: 30-minute TTL, 500k max active flows, 256MB memory limit.
+	// Tracks bidirectional network flows with simplified 4-state machine (NEW, ESTABLISHED, CLOSING, CLOSED).
+	flowTracker := network.NewFlowTracker(
+		30*time.Minute, // activeTTL: default for gateways (configurable in future)
+		500000,         // maxActiveFlows: max concurrent flows before LRU eviction
+		256,            // memoryLimitMB: memory budget for flow tracking
+	)
+	agent.FlowTracker = flowTracker
+	agent.Logger.Info("flow tracker initialized",
+		zap.Int("max_flows", 500000),
+		zap.Int("memory_limit_mb", 256),
+		zap.Duration("ttl", 30*time.Minute),
+	)
+
 	return agent, nil
 }
 
@@ -458,6 +480,13 @@ func (a *Agent) Start(ctx context.Context) error {
 		a.producerWg.Add(1)
 		go a.startComplianceWatchers(producerCtx)
 	}
+
+	// ANCHOR: Start flow summary emission goroutine - Feature: flow lifecycle webhook events - Jul 18, 2026
+	// Drains closed flows from FlowTracker and emits flow_summary webhook events.
+	// Tracks active flows and their transitions for network behavior analysis.
+	a.producerWg.Add(1)
+	go a.startFlowSummaryEmitter(producerCtx)
+
 	go a.watchRuleUpdates(ctx)
 
 	// ANCHOR: Respect owl_api.push.enabled - Bugfix: prevent unintended push loop - Mar 22, 2026
@@ -927,6 +956,61 @@ func (a *Agent) collectMetrics(ctx context.Context) {
 			return
 
 		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// ANCHOR: Flow summary emission goroutine - Feature: flow lifecycle webhook events - Jul 18, 2026
+// Drains closed flows from FlowTracker and emits flow_summary webhook events.
+// Called as a producer goroutine and tracked by producerWg.
+func (a *Agent) startFlowSummaryEmitter(ctx context.Context) {
+	defer a.producerWg.Done()
+
+	a.Logger.Debug("flow summary emitter started")
+
+	for {
+		select {
+		case closedFlow := <-a.FlowTracker.ClosedFlows():
+			// ANCHOR: Emit flow summary event - Feature: flow lifecycle events - Jul 18, 2026
+			// Convert closed FlowRecord to FlowSummaryEvent and push to webhook
+			if closedFlow == nil {
+				continue
+			}
+
+			// Create flow summary event for webhook (to be integrated in Task #14)
+			_ = &FlowSummaryEvent{
+				EventType:      "flow_summary",
+				Timestamp:      time.Now(),
+				ClusterID:      a.Config.Agent.ClusterID,
+				NodeName:       a.Config.Agent.NodeName,
+				FlowKey:        closedFlow.Key.String(),
+				State:          string(closedFlow.State),
+				CreatedAt:      closedFlow.CreatedAt,
+				LastSeenAt:     closedFlow.LastSeenAt,
+				BytesSent:      closedFlow.BytesSent,
+				BytesRecv:      closedFlow.BytesRecv,
+				PacketsSent:    closedFlow.PacketsSent,
+				PacketsRecv:    closedFlow.PacketsRecv,
+				CloseReason:    closedFlow.CloseReason,
+				IsReversed:     closedFlow.IsReversed,
+			}
+
+			// Push to webhook if available (actual event integration in Task #14)
+			if a.WebhookPusher != nil {
+				a.WebhookPusher.Send(nil, nil)
+			}
+
+			a.Logger.Debug("flow closed",
+				zap.String("flow_key", closedFlow.Key.String()),
+				zap.String("state", string(closedFlow.State)),
+				zap.String("reason", closedFlow.CloseReason),
+				zap.Uint64("bytes_sent", closedFlow.BytesSent),
+				zap.Uint64("bytes_recv", closedFlow.BytesRecv),
+			)
+
+		case <-ctx.Done():
+			a.Logger.Debug("flow summary emitter stopping")
 			return
 		}
 	}

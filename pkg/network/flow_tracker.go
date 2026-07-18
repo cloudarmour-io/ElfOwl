@@ -133,7 +133,7 @@ func (ft *FlowTracker) AddOrUpdateFlow(srcIP, dstIP string, srcPort, dstPort uin
 			isReversed = true
 		}
 
-		return key, false, newState
+		return &key, false, newState
 	}
 
 	// Create new flow
@@ -153,7 +153,7 @@ func (ft *FlowTracker) AddOrUpdateFlow(srcIP, dstIP string, srcPort, dstPort uin
 	// Check if we need to evict old flows due to memory pressure
 	ft.evictIfNeeded()
 
-	return key, isNewFlow, FlowStateNEW
+	return &key, isNewFlow, FlowStateNEW
 }
 
 // GetFlowState returns current state of a flow or nil if not found
@@ -303,7 +303,6 @@ func (ft *FlowTracker) Stats() FlowStats {
 func createCanonicalFlowKey(srcIP, dstIP string, srcPort, dstPort uint16, protocol string, netnsID uint32) FlowKey {
 	// Use string comparison for canonical ordering
 	ips := []string{srcIP, dstIP}
-	ports := []uint16{srcPort, dstPort}
 
 	sort.Strings(ips)
 
