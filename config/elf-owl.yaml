@@ -71,6 +71,7 @@ agent:
 
   # Rule engine configuration
   rules:
+    file_path: "./config/rules/cis-controls.yaml"
     config_map:
       name: "elf-owl-rules"
       namespace: "elf-owl-system"
@@ -92,6 +93,9 @@ agent:
     encryption:
       enabled: true
       algorithm: "AES-256-GCM"
+    queue:
+      enabled: true
+      dir: "/var/lib/elf-owl/queue"
 
   # Owl SaaS API configuration
   owl_api:
@@ -133,6 +137,11 @@ agent:
     enabled: true
     listen_address: ":9091"
     path: "/health"
+    readiness:
+      startup_grace_period: 2m
+      max_buffered_events: 1000
+      max_oldest_buffered_event_age: 5m
+      max_consecutive_push_failures: 3
 
   # Outbound webhook pusher — pushes all enriched events to an external ingest listener.
   # Enable with OWL_WEBHOOK_ENABLED=true + OWL_WEBHOOK_TARGET_URL=<url>, or set here.

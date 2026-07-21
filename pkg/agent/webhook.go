@@ -235,7 +235,7 @@ type WebhookPusher struct {
 // ANCHOR: FlushInterval/Timeout zero-value guards - Bug #3: NewTicker(0) panic - Apr 30, 2026
 // BatchSize guard was already present; FlushInterval=0 panics time.NewTicker and Timeout=0
 // means no HTTP deadline — flush goroutine can block indefinitely on a slow endpoint.
-func NewWebhookPusher(cfg WebhookConfig, clusterID, nodeName string, logger *zap.Logger) *WebhookPusher {
+func NewWebhookPusher(cfg WebhookConfig, clusterID, nodeName string, logger *zap.Logger) (*WebhookPusher, error) {
 	if cfg.BatchSize <= 0 {
 		cfg.BatchSize = 100
 	}
@@ -245,9 +245,13 @@ func NewWebhookPusher(cfg WebhookConfig, clusterID, nodeName string, logger *zap
 	if cfg.Timeout <= 0 {
 		cfg.Timeout = 10 * time.Second
 	}
+	transport, err := buildTLSTransport(cfg)
+	if err != nil {
+		return nil, err
+	}
 	httpClient := &http.Client{
 		Timeout:   cfg.Timeout,
-		Transport: buildTLSTransport(cfg),
+		Transport: transport,
 	}
 	return &WebhookPusher{
 		config:    cfg,
@@ -257,7 +261,7 @@ func NewWebhookPusher(cfg WebhookConfig, clusterID, nodeName string, logger *zap
 		eventCh:   make(chan WebhookEvent, cfg.BatchSize*4),
 		logger:    logger,
 		done:      make(chan struct{}),
-	}
+	}, nil
 }
 
 // Start launches the background flush goroutine. Safe to call multiple times; only the first call has effect.
@@ -454,29 +458,35 @@ func isNetworkError(err error) bool {
 // Zero values: system CA pool, no client certificate — safe default for most deployments.
 // TLSCAPath: appends a custom CA (e.g. internal PKI) to the system pool.
 // TLSCertPath+TLSKeyPath: loads a client certificate for mTLS.
-func buildTLSTransport(cfg WebhookConfig) http.RoundTripper {
+func buildTLSTransport(cfg WebhookConfig) (http.RoundTripper, error) {
 	tlsCfg := &cryptotls.Config{}
 
 	if cfg.TLSCAPath != "" {
 		pem, err := os.ReadFile(cfg.TLSCAPath)
-		if err == nil {
-			pool, err := x509.SystemCertPool()
-			if err != nil {
-				pool = x509.NewCertPool()
-			}
-			pool.AppendCertsFromPEM(pem)
-			tlsCfg.RootCAs = pool
+		if err != nil {
+			return nil, fmt.Errorf("read webhook TLS CA %s: %w", cfg.TLSCAPath, err)
 		}
+		pool, err := x509.SystemCertPool()
+		if err != nil {
+			pool = x509.NewCertPool()
+		}
+		if !pool.AppendCertsFromPEM(pem) {
+			return nil, fmt.Errorf("parse webhook TLS CA %s: invalid PEM", cfg.TLSCAPath)
+		}
+		tlsCfg.RootCAs = pool
 	}
 
 	if cfg.TLSCertPath != "" && cfg.TLSKeyPath != "" {
 		cert, err := cryptotls.LoadX509KeyPair(cfg.TLSCertPath, cfg.TLSKeyPath)
-		if err == nil {
-			tlsCfg.Certificates = []cryptotls.Certificate{cert}
+		if err != nil {
+			return nil, fmt.Errorf("load webhook mTLS keypair: %w", err)
 		}
+		tlsCfg.Certificates = []cryptotls.Certificate{cert}
+	} else if cfg.TLSCertPath != "" || cfg.TLSKeyPath != "" {
+		return nil, fmt.Errorf("webhook TLS client certificate and key must be configured together")
 	}
 
-	return &http.Transport{TLSClientConfig: tlsCfg}
+	return &http.Transport{TLSClientConfig: tlsCfg}, nil
 }
 
 // -----------------------------------------------------------------------

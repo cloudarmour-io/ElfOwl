@@ -41,8 +41,10 @@ type Client struct {
 	// Metrics (thread-safe with mutex)
 	mu              sync.Mutex
 	lastPushTime    time.Time
+	lastAttemptTime time.Time
 	failureCount    int64
 	successCount    int64
+	consecutiveFailures int64
 }
 
 // NewClient creates a new Owl API client
@@ -290,6 +292,9 @@ func (c *Client) PushWithRetry(ctx context.Context, bufferedEvents []*evidence.B
 	backoff := c.retryConfig.InitialBackoff
 
 	for attempt := 0; attempt < c.retryConfig.MaxRetries; attempt++ {
+		c.mu.Lock()
+		c.lastAttemptTime = time.Now()
+		c.mu.Unlock()
 		err := c.Push(ctx, bufferedEvents)
 		if err == nil {
 			// ANCHOR: Update metrics on successful push with mutex protection - Dec 26, 2025
@@ -297,6 +302,7 @@ func (c *Client) PushWithRetry(ctx context.Context, bufferedEvents []*evidence.B
 			c.mu.Lock()
 			c.lastPushTime = time.Now()
 			c.successCount++
+			c.consecutiveFailures = 0
 			c.mu.Unlock()
 			return nil
 		}
@@ -326,6 +332,7 @@ func (c *Client) PushWithRetry(ctx context.Context, bufferedEvents []*evidence.B
 	// Thread-safe update of failure counter
 	c.mu.Lock()
 	c.failureCount++
+	c.consecutiveFailures++
 	c.mu.Unlock()
 	return fmt.Errorf("push failed after %d attempts", c.retryConfig.MaxRetries)
 }
@@ -337,6 +344,13 @@ func (c *Client) LastPushTime() time.Time {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.lastPushTime
+}
+
+// LastAttemptTime returns the time of the last push attempt.
+func (c *Client) LastAttemptTime() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.lastAttemptTime
 }
 
 // SuccessCount returns the total number of successful pushes
@@ -355,4 +369,11 @@ func (c *Client) FailureCount() int64 {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.failureCount
+}
+
+// ConsecutiveFailureCount returns the current streak of failed push operations.
+func (c *Client) ConsecutiveFailureCount() int64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.consecutiveFailures
 }

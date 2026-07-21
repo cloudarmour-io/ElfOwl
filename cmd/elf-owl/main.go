@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.uber.org/zap"
@@ -85,6 +86,7 @@ func main() {
 	//      by default via DefaultConfig()). No hardcoded fallbacks — they drifted
 	//      from DefaultConfig() values (:8081/healthz vs :9091/health) and would
 	//      silently override operator configuration if a field ever parsed as "".
+	var healthServer *http.Server
 	if config.Agent.Health.Enabled {
 		healthAddr := config.Agent.Health.ListenAddress
 		healthPath := config.Agent.Health.Path
@@ -93,14 +95,23 @@ func main() {
 		healthMux.HandleFunc(healthPath, func(w http.ResponseWriter, r *http.Request) {
 			status := agentInstance.Health()
 			w.Header().Set("Content-Type", "application/json")
+			if status.Status != "healthy" {
+				w.WriteHeader(http.StatusServiceUnavailable)
+			}
 			if err := json.NewEncoder(w).Encode(status); err != nil {
 				http.Error(w, "encode error", http.StatusInternalServerError)
 			}
 		})
+		healthServer = &http.Server{
+			Addr:              healthAddr,
+			Handler:           healthMux,
+			ReadHeaderTimeout: 5 * time.Second,
+			IdleTimeout:       30 * time.Second,
+		}
 
 		go func() {
 			zapLogger.Info("health server listening", zap.String("addr", healthAddr+healthPath))
-			if err := http.ListenAndServe(healthAddr, healthMux); err != nil && err != http.ErrServerClosed {
+			if err := healthServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 				zapLogger.Error("health server error", zap.Error(err))
 			}
 		}()
@@ -114,16 +125,23 @@ func main() {
 	// HOW: Dedicated net/http server on address and path from config (:9090/metrics
 	//      by default via DefaultConfig()). Fallbacks (:8080/metrics) removed as
 	//      they differed from config defaults and masked misconfiguration.
+	var metricsServer *http.Server
 	if config.Agent.Metrics.Enabled {
 		metricsAddr := config.Agent.Metrics.ListenAddress
 		metricsPath := config.Agent.Metrics.Path
 
 		metricsMux := http.NewServeMux()
 		metricsMux.Handle(metricsPath, promhttp.Handler())
+		metricsServer = &http.Server{
+			Addr:              metricsAddr,
+			Handler:           metricsMux,
+			ReadHeaderTimeout: 5 * time.Second,
+			IdleTimeout:       30 * time.Second,
+		}
 
 		go func() {
 			zapLogger.Info("metrics server listening", zap.String("addr", metricsAddr+metricsPath))
-			if err := http.ListenAndServe(metricsAddr, metricsMux); err != nil && err != http.ErrServerClosed {
+			if err := metricsServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 				zapLogger.Error("metrics server error", zap.Error(err))
 			}
 		}()
@@ -136,8 +154,21 @@ func main() {
 	)
 
 	// Graceful shutdown
+	cancel()
 	if err := agentInstance.Stop(); err != nil {
 		zapLogger.Error("error during shutdown", zap.Error(err))
+	}
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer shutdownCancel()
+	if healthServer != nil {
+		if err := healthServer.Shutdown(shutdownCtx); err != nil {
+			zapLogger.Error("health server shutdown error", zap.Error(err))
+		}
+	}
+	if metricsServer != nil {
+		if err := metricsServer.Shutdown(shutdownCtx); err != nil {
+			zapLogger.Error("metrics server shutdown error", zap.Error(err))
+		}
 	}
 
 	zapLogger.Info("agent stopped successfully")

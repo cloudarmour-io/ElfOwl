@@ -197,12 +197,33 @@ kubectl create secret generic elf-owl-api-token \
   --from-literal=api-token=YOUR_API_TOKEN \
   -n elf-owl-system \
   --dry-run=client -o yaml | kubectl apply -f -
+kubectl create secret generic elf-owl-signing-key \
+  --from-literal=signing-key="$(openssl rand -base64 32)" \
+  -n elf-owl-system \
+  --dry-run=client -o yaml | kubectl apply -f -
+kubectl create secret generic elf-owl-encryption-key \
+  --from-literal=encryption-key="$(openssl rand -base64 32)" \
+  -n elf-owl-system \
+  --dry-run=client -o yaml | kubectl apply -f -
 
 helm upgrade --install elf-owl ./deploy/helm \
   --namespace elf-owl-system \
   --set clusterID=prod-us-east-1 \
   --set owl.endpoint=https://owl-saas.example.com \
   --set owl.apiTokenSecret=elf-owl-api-token
+```
+
+If you want Helm to create the secrets directly:
+
+```bash
+helm upgrade --install elf-owl ./deploy/helm \
+  --namespace elf-owl-system \
+  --set clusterID=prod-us-east-1 \
+  --set owl.endpoint=https://owl-saas.example.com \
+  --set secrets.create=true \
+  --set secrets.apiToken=YOUR_API_TOKEN \
+  --set secrets.signingKey="$(openssl rand -base64 32)" \
+  --set secrets.encryptionKey="$(openssl rand -base64 32)"
 ```
 
 Optional rules ConfigMap source:
@@ -216,9 +237,15 @@ helm upgrade --install elf-owl ./deploy/helm \
 ### Kustomize
 
 ```bash
+# Create secrets from the example manifest first.
+cp deploy/kustomize/base/secrets.example.yaml /tmp/elf-owl-secrets.yaml
+# Edit /tmp/elf-owl-secrets.yaml with real values, then apply it.
+kubectl apply -f /tmp/elf-owl-secrets.yaml
 kubectl apply -k deploy/kustomize/overlays/production
 kubectl apply -k deploy/kustomize/overlays/with-rules
 ```
+
+The DaemonSet mounts a host-backed durable queue at `/var/lib/elf-owl/queue`, so unsent events survive pod restarts on the same node.
 
 ---
 

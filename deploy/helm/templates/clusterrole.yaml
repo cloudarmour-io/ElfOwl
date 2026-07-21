@@ -14,15 +14,15 @@ rules:
   # Read service accounts to populate kubernetes.service_account field
   - apiGroups: [""]
     resources: ["serviceaccounts"]
-    verbs: ["get", "list"]
+    verbs: ["get", "list", "watch"]
   # Read network policies to populate kubernetes.has_default_deny_network_policy
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
-    verbs: ["get", "list"]
+    verbs: ["get", "list", "watch"]
   # Read cluster roles and bindings for RBAC enrichment (CIS 5.x rules)
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources: ["roles", "clusterroles", "rolebindings", "clusterrolebindings"]
-    verbs: ["get", "list"]
+    verbs: ["get", "list", "watch"]
   # Read nodes for node-level context
   - apiGroups: [""]
     resources: ["nodes"]

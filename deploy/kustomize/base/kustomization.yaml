@@ -9,9 +9,17 @@ resources:
   - clusterrole.yaml
   - clusterrolebinding.yaml
   - configmap.yaml
-  - configmap-rules.yaml
   - service.yaml
   - daemonset.yaml
 
 commonLabels:
   app: elf-owl
+
+configMapGenerator:
+  - name: elf-owl-rules
+    namespace: elf-owl-system
+    files:
+      - rules.yaml=../../../config/rules/cis-controls.yaml
+
+generatorOptions:
+  disableNameSuffixHash: true

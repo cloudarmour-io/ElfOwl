@@ -37,13 +37,19 @@ spec:
           # CAP_SYS_RESOURCE allows raising RLIMIT_MEMLOCK for BPF map memory
           securityContext:
             privileged: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsUser: 0
+            runAsNonRoot: false
+            seccompProfile:
+              type: RuntimeDefault
             capabilities:
+              drop:
+                - ALL
               add:
                 - SYS_ADMIN
                 - SYS_RESOURCE
                 - SYS_PTRACE
-              drop:
-                - NET_RAW
 
           env:
             - name: OWL_CLUSTER_ID
@@ -95,6 +101,10 @@ spec:
             - name: config
               mountPath: /etc/elf-owl
               readOnly: true
+            - name: rules
+              mountPath: /etc/elf-owl/cis-controls.yaml
+              subPath: rules.yaml
+              readOnly: true
             # eBPF loader needs access to kernel debug/tracing for tracepoint IDs
             - name: debugfs
               mountPath: /sys/kernel/debug
@@ -103,11 +113,24 @@ spec:
             - name: proc
               mountPath: /proc
               readOnly: true
+            - name: signing-key
+              mountPath: /var/run/secrets/elf-owl-signing-key
+              subPath: signing-key
+              readOnly: true
+            - name: encryption-key
+              mountPath: /var/run/secrets/elf-owl-encryption-key
+              subPath: encryption-key
+              readOnly: true
+            - name: queue
+              mountPath: {{ .Values.storage.queueDir }}
 
       volumes:
         - name: config
           configMap:
             name: elf-owl-config
+        - name: rules
+          configMap:
+            name: {{ default "elf-owl-rules" .Values.rules.configMap.name }}
         - name: debugfs
           hostPath:
             path: /sys/kernel/debug
@@ -116,3 +139,19 @@ spec:
           hostPath:
             path: /proc
             type: Directory
+        - name: signing-key
+          secret:
+            secretName: {{ .Values.owl.signingKeySecret }}
+            items:
+              - key: signing-key
+                path: signing-key
+        - name: encryption-key
+          secret:
+            secretName: {{ .Values.owl.encryptionKeySecret }}
+            items:
+              - key: encryption-key
+                path: encryption-key
+        - name: queue
+          hostPath:
+            path: {{ .Values.storage.queueDir }}
+            type: DirectoryOrCreate

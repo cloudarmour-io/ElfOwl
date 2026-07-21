@@ -25,6 +25,7 @@ type certCacheEntry struct {
 }
 
 const certCacheTTL = 10 * time.Minute
+const certProbeConcurrency = 16
 
 type TLSMonitor struct {
 	programSet *ProgramSet
@@ -37,17 +38,24 @@ type TLSMonitor struct {
 
 	// ANCHOR: cert cache - Feature: cert_sha256 per-SNI cache - Apr 26, 2026
 	// Async probe populates on first miss; cache hit serves all subsequent events for the same SNI.
-	certCache   map[string]*certCacheEntry
-	certCacheMu sync.Mutex
+	certCache        map[string]*certCacheEntry
+	certProbeInFlight map[string]struct{}
+	certProbeSem     chan struct{}
+	certCacheMu      sync.Mutex
 }
 
-func NewTLSMonitor(programSet *ProgramSet, logger *zap.Logger) *TLSMonitor {
+func NewTLSMonitor(programSet *ProgramSet, logger *zap.Logger, chanSize int) *TLSMonitor {
+	if chanSize <= 0 {
+		chanSize = 100
+	}
 	return &TLSMonitor{
 		programSet: programSet,
-		eventChan:  make(chan *enrichment.EnrichedEvent, 100),
+		eventChan:  make(chan *enrichment.EnrichedEvent, chanSize),
 		logger:     logger,
 		stopChan:   make(chan struct{}),
 		certCache:  make(map[string]*certCacheEntry),
+		certProbeInFlight: make(map[string]struct{}),
+		certProbeSem: make(chan struct{}, certProbeConcurrency),
 	}
 }
 
@@ -83,6 +91,22 @@ func (tm *TLSMonitor) setCachedCert(sni string, e *certCacheEntry) {
 	tm.certCacheMu.Unlock()
 }
 
+func (tm *TLSMonitor) startCertProbe(sni string) bool {
+	tm.certCacheMu.Lock()
+	defer tm.certCacheMu.Unlock()
+	if _, ok := tm.certProbeInFlight[sni]; ok {
+		return false
+	}
+	tm.certProbeInFlight[sni] = struct{}{}
+	return true
+}
+
+func (tm *TLSMonitor) finishCertProbe(sni string) {
+	tm.certCacheMu.Lock()
+	delete(tm.certProbeInFlight, sni)
+	tm.certCacheMu.Unlock()
+}
+
 func (tm *TLSMonitor) eventLoop(ctx context.Context) {
 	defer tm.wg.Done()
 	for {
@@ -102,11 +126,11 @@ func (tm *TLSMonitor) eventLoop(ctx context.Context) {
 				time.Sleep(100 * time.Millisecond)
 				continue
 			}
-			if len(data) == 0 {
-				time.Sleep(10 * time.Millisecond)
-				continue
-			}
-			evt, err := DecodeTLSEvent(data)
+				if len(data) == 0 {
+					time.Sleep(10 * time.Millisecond)
+					continue
+				}
+				evt, err := DecodeTLSEvent(data)
 			if err != nil {
 				tm.logger.Warn("parse tls event failed", zap.Error(err))
 				continue
@@ -117,10 +141,18 @@ func (tm *TLSMonitor) eventLoop(ctx context.Context) {
 				zap.Uint16("family", evt.Family),
 				zap.Uint8("protocol", evt.Protocol),
 				zap.Uint16("src_port", evt.SrcPort),
-				zap.Uint16("dst_port", evt.DstPort),
-				zap.Uint32("length", evt.Length),
-			)
-			enriched := &enrichment.EnrichedEvent{
+					zap.Uint16("dst_port", evt.DstPort),
+					zap.Uint32("length", evt.Length),
+				)
+				if evt.Length == 0 || int(evt.Length) > len(evt.Metadata) {
+					tm.logger.Warn("invalid tls metadata length, event dropped",
+						zap.Uint32("pid", evt.PID),
+						zap.Uint32("length", evt.Length),
+						zap.Int("max_length", len(evt.Metadata)),
+					)
+					continue
+				}
+				enriched := &enrichment.EnrichedEvent{
 				RawEvent:  evt,
 				EventType: "tls_client_hello",
 				TLS:       &enrichment.TLSContext{},
@@ -164,32 +196,37 @@ func (tm *TLSMonitor) eventLoop(ctx context.Context) {
 				// cached values. Acceptable trade-off: reliable event capture beats complete cert
 				// data on event #1.
 				if meta.SNI != "" {
-					if cached := tm.getCachedCert(meta.SNI); cached != nil {
-						tlsCtx.CertSHA256 = cached.sha256
-						tlsCtx.CertIssuer = cached.issuer
-						tlsCtx.CertExpiry = cached.expiry
-					} else {
-						sni := meta.SNI
-						dstPort := evt.DstPort
-						go func() {
-							certSHA256, issuer, expiry := probeCert(sni, dstPort)
-							if certSHA256 == "" {
-								return
-							}
+						if cached := tm.getCachedCert(meta.SNI); cached != nil {
+							tlsCtx.CertSHA256 = cached.sha256
+							tlsCtx.CertIssuer = cached.issuer
+							tlsCtx.CertExpiry = cached.expiry
+						} else if tm.startCertProbe(meta.SNI) {
+							sni := meta.SNI
+							dstPort := evt.DstPort
+							go func() {
+								tm.certProbeSem <- struct{}{}
+								defer func() {
+									<-tm.certProbeSem
+									tm.finishCertProbe(sni)
+								}()
+								certSHA256, issuer, expiry := probeCert(sni, dstPort)
+								if certSHA256 == "" {
+									return
+								}
 							tm.setCachedCert(sni, &certCacheEntry{
 								sha256:    certSHA256,
 								issuer:    issuer,
 								expiry:    expiry,
 								fetchedAt: time.Now(),
 							})
-							tm.logger.Debug("tls cert probed",
-								zap.String("sni", sni),
-								zap.String("cert_sha256", certSHA256),
-								zap.String("cert_issuer", issuer),
-							)
-						}()
+								tm.logger.Debug("tls cert probed",
+									zap.String("sni", sni),
+									zap.String("cert_sha256", certSHA256),
+									zap.String("cert_issuer", issuer),
+								)
+							}()
+						}
 					}
-				}
 				enriched.TLS = tlsCtx
 			}
 			select {

@@ -44,6 +44,32 @@ data:
       kubernetes:
         in_cluster: true
         metadata_cache_ttl: 60s
+        watch_interval: 0s
+
+      evidence:
+        signing:
+          enabled: true
+          algorithm: "HMAC-SHA256"
+        encryption:
+          enabled: true
+          algorithm: "AES-256-GCM"
+        queue:
+          enabled: true
+          dir: {{ .Values.storage.queueDir | quote }}
+
+      rules:
+        file_path: "/etc/elf-owl/cis-controls.yaml"
+        {{- if .Values.rules.configMap.enabled }}
+        config_map:
+          name: {{ default "elf-owl-rules" .Values.rules.configMap.name | quote }}
+          namespace: {{ default .Release.Namespace .Values.rules.configMap.namespace | quote }}
+        {{- else }}
+        config_map:
+          name: ""
+          namespace: ""
+        {{- end }}
+        eval_timeout: 5s
+        log_violations: true
 
       owl_api:
         endpoint: {{ .Values.owl.endpoint | quote }}
@@ -64,15 +90,6 @@ data:
           enabled: true
           verify: true
 
-      {{- if .Values.rules.configMap.enabled }}
-      rules:
-        config_map:
-          name: {{ default "elf-owl-rules" .Values.rules.configMap.name | quote }}
-          namespace: {{ default .Release.Namespace .Values.rules.configMap.namespace | quote }}
-        eval_timeout: 5s
-        log_violations: true
-      {{- end }}
-
       metrics:
         enabled: {{ .Values.metrics.enabled }}
         listen_address: {{ .Values.metrics.listenAddress | quote }}
@@ -82,3 +99,8 @@ data:
         enabled: {{ .Values.health.enabled }}
         listen_address: {{ .Values.health.listenAddress | quote }}
         path: {{ .Values.health.path | quote }}
+        readiness:
+          startup_grace_period: {{ .Values.health.readiness.startupGracePeriod | quote }}
+          max_buffered_events: {{ .Values.health.readiness.maxBufferedEvents }}
+          max_oldest_buffered_event_age: {{ .Values.health.readiness.maxOldestBufferedEventAge | quote }}
+          max_consecutive_push_failures: {{ .Values.health.readiness.maxConsecutivePushFailures }}

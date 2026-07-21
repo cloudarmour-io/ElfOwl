@@ -51,6 +51,9 @@ type MetricsRecorder interface {
 	RecordEnrichmentError()
 	RecordHostEventDiscarded()
 	RecordK8sLookupFailedDiscarded()
+	RecordPushSuccess()
+	RecordPushFailure()
+	RecordPushLatency(seconds float64)
 	SetEventsBuffered(count int)
 }
 
@@ -116,8 +119,15 @@ type HealthStatus struct {
 	Monitors         map[string]bool `json:"monitors"`
 	EventsProcessed  int64           `json:"events_processed"`
 	ViolationsFound  int64           `json:"violations_found"`
+	BufferedEvents   int             `json:"buffered_events"`
+	OldestBufferedEventAge time.Duration `json:"oldest_buffered_event_age"`
 	LastPushTime     time.Time       `json:"last_push_time"`
+	LastPushAttempt  time.Time       `json:"last_push_attempt"`
+	PushSuccessCount int64           `json:"push_success_count"`
 	PushFailureCount int64           `json:"push_failure_count"`
+	ConsecutivePushFailures int64    `json:"consecutive_push_failures"`
+	Ready            bool            `json:"ready"`
+	Reasons          []string        `json:"reasons,omitempty"`
 	Status           string          `json:"status"`
 }
 
@@ -147,7 +157,11 @@ func NewAgent(config *Config) (*Agent, error) {
 	// When kubernetes_metadata is disabled, skip Kubernetes client creation entirely.
 	var k8sClient *kubernetes.Client
 	if config.Agent.Enrichment.KubernetesMetadata {
-		k8sClient, err = kubernetes.NewClient(config.Agent.Kubernetes.InCluster)
+		k8sClient, err = kubernetes.NewClient(
+			config.Agent.Kubernetes.InCluster,
+			kubernetes.WithMetadataCacheTTL(config.Agent.Kubernetes.MetadataCacheTTL),
+			kubernetes.WithInformerResync(config.Agent.Kubernetes.WatchInterval),
+		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create kubernetes client: %w", err)
 		}
@@ -226,13 +240,23 @@ func NewAgent(config *Config) (*Agent, error) {
 	agent.Logger.Info("evidence signer and cipher initialized")
 
 	// Initialize event buffer
+	bufferOptions := make([]evidence.BufferOption, 0, 1)
+	if config.Agent.Evidence.Queue.Enabled {
+		bufferOptions = append(bufferOptions, evidence.WithDurableStore(config.Agent.Evidence.Queue.Dir))
+	}
 	agent.EventBuffer = evidence.NewBuffer(
 		config.Agent.OWL.Push.BatchSize,
 		config.Agent.OWL.Push.BatchTimeout,
+		bufferOptions...,
 	)
+	if err := agent.EventBuffer.InitError(); err != nil {
+		return nil, fmt.Errorf("failed to initialize event buffer: %w", err)
+	}
 	agent.Logger.Info("event buffer initialized",
 		zap.Int("batch_size", config.Agent.OWL.Push.BatchSize),
 		zap.Duration("batch_timeout", config.Agent.OWL.Push.BatchTimeout),
+		zap.Bool("durable", config.Agent.Evidence.Queue.Enabled),
+		zap.String("queue_dir", agent.EventBuffer.DurablePath()),
 	)
 
 	// ANCHOR: Build TLS config for Owl API client - Findings Note fix - Feb 18, 2026
@@ -276,12 +300,15 @@ func NewAgent(config *Config) (*Agent, error) {
 	// ANCHOR: Outbound webhook pusher init - Feature: ClickHouse event push - Apr 29, 2026
 	// Created here so the pusher is ready before Start() launches the flush goroutine.
 	if config.Agent.Webhook.Enabled {
-		agent.WebhookPusher = NewWebhookPusher(
+		agent.WebhookPusher, err = NewWebhookPusher(
 			config.Agent.Webhook,
 			config.Agent.ClusterID,
 			config.Agent.NodeName,
 			zapLogger,
 		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create webhook pusher: %w", err)
+		}
 		agent.Logger.Info("webhook pusher initialized",
 			zap.String("target", config.Agent.Webhook.TargetURL),
 		)
@@ -390,10 +417,10 @@ func (a *Agent) Start(ctx context.Context) error {
 		if a.Config.Agent.EBPF.Capability.Enabled && collection.Capability != nil {
 			a.CapabilityMonitor = ebpf.NewCapabilityMonitor(collection.Capability, a.Logger)
 		}
-		if a.Config.Agent.EBPF.TLS.Enabled && collection.TLS != nil {
-			a.TLSMonitor = ebpf.NewTLSMonitor(collection.TLS, a.Logger)
+			if a.Config.Agent.EBPF.TLS.Enabled && collection.TLS != nil {
+				a.TLSMonitor = ebpf.NewTLSMonitor(collection.TLS, a.Logger, a.Config.Agent.EBPF.TLS.BufferSize)
+			}
 		}
-	}
 
 	// ANCHOR: Start all cilium/ebpf monitors with context - Dec 27, 2025
 	// Each monitor manages its own lifecycle via context cancellation
@@ -568,7 +595,10 @@ func (a *Agent) handleRuntimeEvent(
 	}
 
 	// Queue for evidence processing
-	a.EventBuffer.Enqueue(enrichedEvent, violations)
+	if err := a.EventBuffer.Enqueue(enrichedEvent, violations); err != nil {
+		a.Logger.Error("failed to enqueue event", zap.Error(err))
+		return
+	}
 	// ANCHOR: Forward to outbound webhook pusher - Feature: ClickHouse event push - Apr 29, 2026
 	if a.WebhookPusher != nil {
 		a.WebhookPusher.Send(enrichedEvent, violations)
@@ -844,7 +874,10 @@ func (a *Agent) handleComplianceEvent(ctx context.Context, event *enrichment.Enr
 		a.MetricsRegistry.RecordViolationsFound(len(violations))
 	}
 
-	a.EventBuffer.Enqueue(event, violations)
+	if err := a.EventBuffer.Enqueue(event, violations); err != nil {
+		a.Logger.Error("failed to enqueue compliance event", zap.Error(err))
+		return
+	}
 	if a.WebhookPusher != nil {
 		a.WebhookPusher.Send(event, violations)
 	}
@@ -867,32 +900,59 @@ func (a *Agent) pushEvents(ctx context.Context) {
 
 	for {
 		select {
-		case <-ticker.C:
-			// Check if buffer is ready to flush
-			if a.EventBuffer.IsFull() || a.EventBuffer.IsStale() {
-				bufferedEvents := a.EventBuffer.Flush()
-				if len(bufferedEvents) > 0 {
-					if a.Config.Agent.OWL.Push.DryRun {
-						a.Logger.Info("dry-run: would push events",
-							zap.Int("count", len(bufferedEvents)),
-						)
-					} else {
-						if err := a.APIClient.PushWithRetry(ctx, bufferedEvents); err != nil {
-							a.Logger.Error("failed to push events", zap.Error(err))
+			case <-ticker.C:
+				// Check if buffer is ready to flush
+				if a.EventBuffer.IsFull() || a.EventBuffer.IsStale() {
+					bufferedEvents := a.EventBuffer.Flush()
+					if len(bufferedEvents) > 0 {
+						if a.Config.Agent.OWL.Push.DryRun {
+							a.Logger.Info("dry-run: would push events",
+								zap.Int("count", len(bufferedEvents)),
+							)
+						} else {
+							startedAt := time.Now()
+							if err := a.APIClient.PushWithRetry(ctx, bufferedEvents); err != nil {
+								a.EventBuffer.RequeueFront(bufferedEvents)
+								a.MetricsRegistry.RecordPushFailure()
+								a.Logger.Error("failed to push events", zap.Error(err))
+							} else {
+								if err := a.EventBuffer.Ack(bufferedEvents); err != nil {
+									a.EventBuffer.RequeueFront(bufferedEvents)
+									a.MetricsRegistry.RecordPushFailure()
+									a.Logger.Error("failed to ack pushed events", zap.Error(err))
+									continue
+								}
+								a.MetricsRegistry.RecordPushSuccess()
+								a.MetricsRegistry.RecordPushLatency(time.Since(startedAt).Seconds())
+							}
 						}
 					}
 				}
-			}
 
-		case <-a.done:
-			// Final flush on shutdown
-			bufferedEvents := a.EventBuffer.Flush()
-			if len(bufferedEvents) > 0 {
-				if err := a.APIClient.PushWithRetry(ctx, bufferedEvents); err != nil {
-					a.Logger.Error("failed to push events on shutdown", zap.Error(err))
+			case <-a.done:
+				// Final flush on shutdown
+				bufferedEvents := a.EventBuffer.Flush()
+				if len(bufferedEvents) > 0 {
+					shutdownCtx, cancel := context.WithTimeout(context.Background(), a.Config.Agent.OWL.Retry.MaxBackoff+a.Config.Agent.OWL.Push.BatchTimeout)
+					startedAt := time.Now()
+					err := a.APIClient.PushWithRetry(shutdownCtx, bufferedEvents)
+					cancel()
+					if err != nil {
+						a.EventBuffer.RequeueFront(bufferedEvents)
+						a.MetricsRegistry.RecordPushFailure()
+						a.Logger.Error("failed to push events on shutdown", zap.Error(err))
+					} else {
+						if err := a.EventBuffer.Ack(bufferedEvents); err != nil {
+							a.EventBuffer.RequeueFront(bufferedEvents)
+							a.MetricsRegistry.RecordPushFailure()
+							a.Logger.Error("failed to ack pushed events on shutdown", zap.Error(err))
+							return
+						}
+						a.MetricsRegistry.RecordPushSuccess()
+						a.MetricsRegistry.RecordPushLatency(time.Since(startedAt).Seconds())
+					}
 				}
-			}
-			return
+				return
 
 		case <-ctx.Done():
 			return
@@ -1102,6 +1162,9 @@ func (a *Agent) Stop() error {
 	if a.WebhookPusher != nil {
 		a.WebhookPusher.Stop()
 	}
+	if a.K8sClient != nil {
+		a.K8sClient.Close()
+	}
 
 	if len(errs) > 0 {
 		return fmt.Errorf("errors during shutdown: %v", errs)
@@ -1121,21 +1184,104 @@ func (a *Agent) Health() HealthStatus {
 	violationsFound := a.violationsFound
 	a.metricsMutex.Unlock()
 
+	monitors := map[string]bool{
+		"process":    a.ProcessMonitor != nil,
+		"network":    a.NetworkMonitor != nil,
+		"dns":        a.DNSMonitor != nil,
+		"file":       a.FileMonitor != nil,
+		"capability": a.CapabilityMonitor != nil,
+		"tls":        a.TLSMonitor != nil,
+	}
+	status := "healthy"
+	reasons := make([]string, 0)
+	markDegraded := func(reason string) {
+		status = "degraded"
+		if reason != "" {
+			reasons = append(reasons, reason)
+		}
+	}
+	if a.RuleEngine == nil || a.APIClient == nil || a.EventBuffer == nil {
+		markDegraded("core components are not fully initialized")
+	}
+	if a.Config.Agent.Enrichment.KubernetesMetadata && a.K8sClient == nil {
+		markDegraded("kubernetes metadata is enabled but kubernetes client is unavailable")
+	}
+	if a.Config.Agent.EBPF.Enabled {
+		if a.Config.Agent.EBPF.Process.Enabled && !monitors["process"] {
+			markDegraded("process monitor is unavailable")
+		}
+		if a.Config.Agent.EBPF.Network.Enabled && !monitors["network"] {
+			markDegraded("network monitor is unavailable")
+		}
+		if a.Config.Agent.EBPF.DNS.Enabled && !monitors["dns"] {
+			markDegraded("dns monitor is unavailable")
+		}
+		if a.Config.Agent.EBPF.File.Enabled && !monitors["file"] {
+			markDegraded("file monitor is unavailable")
+		}
+		if a.Config.Agent.EBPF.Capability.Enabled && !monitors["capability"] {
+			markDegraded("capability monitor is unavailable")
+		}
+		if a.Config.Agent.EBPF.TLS.Enabled && !monitors["tls"] {
+			markDegraded("tls monitor is unavailable")
+		}
+	}
+	if a.Config.Agent.Webhook.Enabled && a.WebhookPusher == nil {
+		markDegraded("webhook delivery is enabled but the webhook pusher is unavailable")
+	}
+	bufferedEvents := 0
+	oldestBufferedAge := time.Duration(0)
+	if a.EventBuffer != nil {
+		bufferedEvents = a.EventBuffer.Count()
+		oldestBufferedAge = a.EventBuffer.OldestAge()
+	}
+	var lastPushTime time.Time
+	var lastPushAttempt time.Time
+	var pushFailureCount int64
+	var pushSuccessCount int64
+	var consecutiveFailures int64
+	if a.APIClient != nil {
+		lastPushTime = a.APIClient.LastPushTime()
+		lastPushAttempt = a.APIClient.LastAttemptTime()
+		pushFailureCount = a.APIClient.FailureCount()
+		pushSuccessCount = a.APIClient.SuccessCount()
+		consecutiveFailures = a.APIClient.ConsecutiveFailureCount()
+	}
+
+	if a.Config.Agent.OWL.Push.Enabled && a.APIClient != nil && a.EventBuffer != nil {
+		readiness := a.Config.Agent.Health.Readiness
+		if readiness.StartupGracePeriod > 0 && time.Since(a.startTime) > readiness.StartupGracePeriod {
+			if readiness.MaxConsecutivePushFailures > 0 && consecutiveFailures >= readiness.MaxConsecutivePushFailures {
+				markDegraded(fmt.Sprintf("delivery has failed %d times in a row", consecutiveFailures))
+			}
+			if readiness.MaxBufferedEvents > 0 && bufferedEvents > readiness.MaxBufferedEvents {
+				markDegraded(fmt.Sprintf("buffered events %d exceed readiness threshold %d", bufferedEvents, readiness.MaxBufferedEvents))
+			}
+			if readiness.MaxOldestBufferedEventAge > 0 && oldestBufferedAge > readiness.MaxOldestBufferedEventAge {
+				markDegraded(fmt.Sprintf("oldest buffered event age %s exceeds readiness threshold %s", oldestBufferedAge, readiness.MaxOldestBufferedEventAge))
+			}
+			if pushFailureCount > 0 && pushSuccessCount == 0 && bufferedEvents > 0 {
+				markDegraded("delivery has not completed a successful push since startup")
+			}
+		}
+	}
+
 	return HealthStatus{
-		AgentVersion:     "0.1.0",
-		Uptime:           time.Since(a.startTime),
-		Status:           "healthy",
-		EventsProcessed:  eventsProcessed,
-		ViolationsFound:  violationsFound,
-		LastPushTime:     a.APIClient.LastPushTime(),
-		PushFailureCount: a.APIClient.FailureCount(),
-		Monitors: map[string]bool{
-			"process":    a.ProcessMonitor != nil,
-			"network":    a.NetworkMonitor != nil,
-			"dns":        a.DNSMonitor != nil, // DNS monitor now available via cilium/ebpf
-			"file":       a.FileMonitor != nil,
-			"capability": a.CapabilityMonitor != nil,
-		},
+		AgentVersion:            "0.1.0",
+		Uptime:                  time.Since(a.startTime),
+		Status:                  status,
+		Ready:                   status == "healthy",
+		Reasons:                 reasons,
+		EventsProcessed:         eventsProcessed,
+		ViolationsFound:         violationsFound,
+		BufferedEvents:          bufferedEvents,
+		OldestBufferedEventAge:  oldestBufferedAge,
+		LastPushTime:            lastPushTime,
+		LastPushAttempt:         lastPushAttempt,
+		PushSuccessCount:        pushSuccessCount,
+		PushFailureCount:        pushFailureCount,
+		ConsecutivePushFailures: consecutiveFailures,
+		Monitors:                monitors,
 	}
 }
 
