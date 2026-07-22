@@ -122,6 +122,10 @@ type Collection struct {
 	// TLS monitors outbound TLS ClientHello metadata
 	TLS *ProgramSet
 
+	// ANCHOR: TCP state monitor program - Feature: kernel TCP state tracking - Jul 22, 2026
+	// Monitors tcp_set_state kprobe events for accurate flow state transitions
+	TCPState *ProgramSet
+
 	// Logger for diagnostics
 	Logger *zap.Logger
 
@@ -607,6 +611,8 @@ func LoadProgramsWithOptions(logger *zap.Logger, opts LoadOptions) (*Collection,
 			coll.DNS = programSet
 		case TLSProgramName:
 			coll.TLS = programSet
+		case TCPStateProgramName:
+			coll.TCPState = programSet
 		}
 	}
 
