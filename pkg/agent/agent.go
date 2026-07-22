@@ -619,6 +619,15 @@ func (a *Agent) handleRuntimeEvent(
 	// ANCHOR: Flow tracking for network events - Feature: bidirectional flow correlation - Jul 18, 2026
 	// After enrichment, correlate network events into bidirectional flows and populate flow fields.
 	if enrichedEvent != nil && enrichedEvent.Network != nil && a.FlowTracker != nil {
+		// ANCHOR: Flow state determination - Feature: conntrack-style state tracking - Jul 22, 2026
+		// Map connection state to flow state, defaulting to NEW for initial events.
+		// For now, all incoming events are treated as NEW or ESTABLISHED.
+		// Future phases will implement full state machine from TCP flags/netlink events.
+		flowStateValue := network.FlowStateNEW
+		if enrichedEvent.Network.ConnectionState != "" {
+			flowStateValue = network.FlowState(enrichedEvent.Network.ConnectionState)
+		}
+
 		// Call FlowTracker.AddOrUpdateFlow() to correlate events into bidirectional flows
 		flowKey, isNewFlow, flowState := a.FlowTracker.AddOrUpdateFlow(
 			enrichedEvent.Network.SourceIP,
@@ -628,7 +637,7 @@ func (a *Agent) handleRuntimeEvent(
 			enrichedEvent.Network.Protocol,
 			enrichedEvent.Network.NetworkNamespaceID,
 			0, // bytes - will be set to 0 for now (can be extended with packet size in future)
-			network.FlowState(enrichedEvent.Network.ConnectionState), // Map connection state to flow state
+			flowStateValue,
 		)
 
 		// Populate flow fields in NetworkContext
@@ -638,6 +647,7 @@ func (a *Agent) handleRuntimeEvent(
 			a.Logger.Debug("flow tracked",
 				zap.String("flow_id", enrichedEvent.Network.FlowID),
 				zap.String("flow_state", string(flowState)),
+				zap.String("state_source", enrichedEvent.Network.ConnectionState),
 				zap.Bool("is_new", isNewFlow),
 			)
 		}
