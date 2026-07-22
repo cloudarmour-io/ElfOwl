@@ -1,5 +1,5 @@
 // ANCHOR: TCP State Monitor - Feature: kernel TCP state tracking - Jul 22, 2026
-// Monitors tcp_set_state tracepoint events and updates flow states accordingly
+// Monitors tcp_set_state kprobe events and updates flow states accordingly
 
 package ebpf
 
@@ -8,8 +8,7 @@ import (
 	"encoding/binary"
 	"fmt"
 
-	"github.com/cilium/ebpf"
-	"github.com/cilium/ebpf/perf"
+	"github.com/cilium/ebpf/ringbuf"
 	"go.uber.org/zap"
 
 	"github.com/udyansh/elf-owl/pkg/network"
@@ -19,22 +18,16 @@ import (
 type TCPStateMonitor struct {
 	Logger       *zap.Logger
 	programSet   *ProgramSet
-	reader       Reader
+	reader       *ringbuf.Reader
 	eventChannel chan *TCPStateEvent
 	stopChan     chan struct{}
 }
 
 // TCPStateEvent represents a TCP state change event from kernel
+// Note: This must match the struct definition in tcp_state.c
 type TCPStateEvent struct {
 	Timestamp uint64
-	PID       uint32
-	OldState  uint32
 	NewState  uint32
-	SrcAddr   uint32
-	DstAddr   uint32
-	SrcPort   uint16
-	DstPort   uint16
-	Family    uint8
 }
 
 // NewTCPStateMonitor creates a new TCP state monitor
@@ -43,14 +36,21 @@ func NewTCPStateMonitor(logger *zap.Logger, programSet *ProgramSet) (*TCPStateMo
 		logger = zap.NewNop()
 	}
 
-	if programSet == nil || programSet.Program == nil {
+	if programSet == nil {
 		return nil, fmt.Errorf("invalid program set for tcp state monitor")
 	}
 
-	// Create perf reader for tcp_state_events
-	reader, err := perf.NewReader(programSet.Maps["tcp_state_events"], 4096)
+	// Get the tcp_state_events map
+	eventsMap := programSet.Maps["tcp_state_events"]
+	if eventsMap == nil {
+		logger.Warn("tcp_state_events map not found, tcp state tracking disabled")
+		return nil, nil
+	}
+
+	// Create ringbuf reader for tcp_state_events
+	reader, err := ringbuf.NewReader(eventsMap)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create perf reader for tcp state events: %w", err)
+		return nil, fmt.Errorf("failed to create ringbuf reader for tcp state events: %w", err)
 	}
 
 	return &TCPStateMonitor{
@@ -64,7 +64,7 @@ func NewTCPStateMonitor(logger *zap.Logger, programSet *ProgramSet) (*TCPStateMo
 
 // Start begins monitoring TCP state events
 func (m *TCPStateMonitor) Start() error {
-	if m.programSet == nil {
+	if m.reader == nil {
 		return fmt.Errorf("tcp state monitor not initialized")
 	}
 
@@ -98,7 +98,7 @@ func (m *TCPStateMonitor) readEvents() {
 			continue
 		}
 
-		// Parse event from perf buffer
+		// Parse event from ringbuf
 		var event TCPStateEvent
 		reader := bytes.NewReader(record.RawSample)
 		if err := binary.Read(reader, binary.LittleEndian, &event); err != nil {
@@ -117,8 +117,6 @@ func (m *TCPStateMonitor) readEvents() {
 			return
 		default:
 			m.Logger.Warn("tcp state event channel full, dropping event",
-				zap.Uint32("pid", event.PID),
-				zap.Uint32("old_state", event.OldState),
 				zap.Uint32("new_state", event.NewState),
 			)
 		}
@@ -130,10 +128,7 @@ func (m *TCPStateMonitor) Events() <-chan *TCPStateEvent {
 	return m.eventChannel
 }
 
-// StateTransitionName returns human-readable state transition description
-func (m *TCPStateMonitor) StateTransitionName(event *TCPStateEvent) string {
-	return fmt.Sprintf("%s → %s",
-		network.TCPStateName(event.OldState),
-		network.TCPStateName(event.NewState),
-	)
+// StateTransitionName returns human-readable state name
+func (m *TCPStateMonitor) StateTransitionName(newState uint32) string {
+	return network.TCPStateName(newState)
 }
