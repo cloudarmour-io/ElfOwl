@@ -608,6 +608,15 @@ func (a *Agent) Start(ctx context.Context) error {
 	// Launch periodic metrics collector
 	go a.collectMetrics(ctx)
 
+	// ANCHOR: Launch periodic flow expiry - Bug: ExpireOldFlows never called, idle flows never TTL-expired - Aug 14, 2026
+	// Without this, flows that never see a graceful FIN/CLOSE (silently dropped connections,
+	// crashed peers) accumulated in FlowTracker's active map forever, only ever shrinking via
+	// MaxActiveFlows/LRU eviction. ExpireOldFlows() itself already closes+emits+removes; it
+	// just needed a periodic caller.
+	if a.FlowTracker != nil {
+		go a.expireFlowsLoop(ctx)
+	}
+
 	a.Logger.Info("agent started successfully")
 	return nil
 }
@@ -722,6 +731,14 @@ func (a *Agent) handleRuntimeEvent(
 				// ANCHOR: Record flow creation metric - Bug: elf_owl_flows_created_total never incremented - Aug 14, 2026
 				if isNewFlow {
 					a.MetricsRegistry.RecordFlowCreated()
+				}
+
+				// ANCHOR: Close flow on terminal state - Bug: CloseFlow never called - Aug 14, 2026
+				// AddOrUpdateFlow only overwrites flow.State in place; nothing ever removed the
+				// flow from the active map or pushed it onto FlowTracker.ClosedFlows() for the
+				// webhook emitter/RecordFlowClosed metric until CloseFlow actually ran.
+				if flowState == network.FlowStateCLOSED {
+					a.FlowTracker.CloseFlow(flowKey, "fin")
 				}
 			}
 		}
@@ -1122,6 +1139,32 @@ func (a *Agent) collectMetrics(ctx context.Context) {
 			// already tracks ActiveFlows, so refresh the gauge on the same periodic tick.
 			if a.FlowTracker != nil {
 				a.MetricsRegistry.SetFlowsActive(a.FlowTracker.Stats().ActiveFlows)
+			}
+
+		case <-a.done:
+			return
+
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// ANCHOR: Periodic flow expiry - Bug: idle flows never TTL-expired - Aug 14, 2026
+// Calls FlowTracker.ExpireOldFlows() periodically so flows that never see a graceful
+// FIN/CLOSE (dropped connections, crashed peers) still close, emit, and free memory.
+// Not tracked by producerWg: ExpireOldFlows() only writes to FlowTracker.ClosedFlows(),
+// which startFlowSummaryEmitter (a tracked producer) drains; this loop never calls
+// WebhookPusher.Send() directly.
+func (a *Agent) expireFlowsLoop(ctx context.Context) {
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			if expired := a.FlowTracker.ExpireOldFlows(); expired > 0 {
+				a.Logger.Debug("expired idle flows", zap.Int("count", expired))
 			}
 
 		case <-a.done:
