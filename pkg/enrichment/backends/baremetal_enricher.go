@@ -23,6 +23,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/udyansh/elf-owl/pkg/ebpf"
 	"github.com/udyansh/elf-owl/pkg/enrichment"
 )
 
@@ -95,6 +96,14 @@ func (be *BareMetalEnricher) Capabilities() enrichment.EnrichmentCapabilities {
 // EnrichNetworkEvent adds bare-metal context (hostname, process, user, SELinux)
 // ANCHOR: Network event enrichment - Feature: bare-metal context - Jul 18, 2026
 // Populates SourceEnrichment and DestEnrichment with BareMetalSourceContext.
+// ANCHOR: Populate NetworkContext from raw event - Bug: flows never tracked - Aug 14, 2026
+// Previously hardcoded SourceIP/DestinationIP to "0.0.0.0" and left SourcePort,
+// DestinationPort, Protocol, Direction, ConnectionState, and NetworkNamespaceID at their zero
+// values, discarding everything ebpf.NetworkMonitor already parsed from the raw eBPF event.
+// Every network event collapsed to the same degenerate all-zero flow tuple, so
+// FlowTracker never tracked real traffic and ConnectionState was always empty (flows
+// permanently reported as "new"). Now type-asserts the raw *ebpf.NetworkEvent and maps it
+// with the exact same helpers ebpf.NetworkMonitor uses, so both paths agree.
 func (be *BareMetalEnricher) EnrichNetworkEvent(ctx context.Context, rawEvent interface{}) (*enrichment.EnrichedEvent, error) {
 	// Check context timeout
 	select {
@@ -103,22 +112,31 @@ func (be *BareMetalEnricher) EnrichNetworkEvent(ctx context.Context, rawEvent in
 	default:
 	}
 
-	// Create base enriched event from raw event
-	// For now, create a minimal enriched event
 	enriched := &enrichment.EnrichedEvent{
 		RawEvent:  rawEvent,
 		EventType: "network_connection",
 		Timestamp: time.Now(),
 	}
 
-	// Create network context (this would be populated from the raw eBPF event in real implementation)
-	enriched.Network = &enrichment.NetworkContext{
-		SourceIP:      "0.0.0.0",
-		DestinationIP: "0.0.0.0",
+	netEvt, ok := rawEvent.(*ebpf.NetworkEvent)
+	if !ok {
+		return nil, fmt.Errorf("bare-metal enricher: unexpected raw event type %T for network event", rawEvent)
 	}
 
-	// Enrich source and destination
-	sourceCtx, err := be.enrichSourceContext(ctx, "0.0.0.0", 0)
+	sourceIP, destinationIP := ebpf.NetworkIPs(netEvt)
+	enriched.Network = &enrichment.NetworkContext{
+		SourceIP:           sourceIP,
+		DestinationIP:      destinationIP,
+		SourcePort:         netEvt.SPort,
+		DestinationPort:    netEvt.DPort,
+		Protocol:           ebpf.IPProtoName(netEvt.Protocol),
+		Direction:          ebpf.NetworkDirection(netEvt.Direction),
+		ConnectionState:    ebpf.TCPStateName(netEvt.State),
+		NetworkNamespaceID: netEvt.NetNS,
+	}
+
+	// Enrich source context with hostname/process/user/SELinux info
+	sourceCtx, err := be.enrichSourceContext(ctx, sourceIP, netEvt.PID)
 	if err == nil && sourceCtx != nil {
 		enriched.Network.SourceEnrichment = sourceCtx
 	}
