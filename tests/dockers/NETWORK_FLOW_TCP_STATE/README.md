@@ -169,6 +169,19 @@ docker image rm elf-owl:flowtest-manual
 
 ## Troubleshooting
 
+### Disk fills up on shared test hosts
+
+The `network`/`tcp_state` eBPF programs attach to kprobes/tracepoints on the
+**host kernel**, not just this test's own containers. On a shared host also
+running other real traffic (other products' test suites, etc.), logging at
+`debug` level captures every event system-wide, not just this test's -- one
+run left running overnight grew a single container's log to 9.4GB with
+`logging.level: debug`. This suite therefore defaults to `info`, and every
+container the script starts is run with `--log-opt max-size=20m --log-opt
+max-file=3` as a second safety net regardless of log level. Don't lower the
+level back to `debug` and leave the container running (`--keep`) unattended
+on a shared host.
+
 ### `/sys/kernel/btf/vmlinux missing or empty`
 
 The host kernel doesn't expose BTF, or `bpftool` hasn't generated

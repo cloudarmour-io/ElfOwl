@@ -188,6 +188,8 @@ touch "$WORKDIR/webhook-data/events.log"
 docker run -d \
     --name "$WEBHOOK_CONTAINER" \
     --network "$NETWORK_NAME" \
+    --log-opt max-size=20m \
+    --log-opt max-file=3 \
     -v "$SCRIPT_DIR/webhook_receiver.py:/receiver.py:ro" \
     -v "$WORKDIR/webhook-data:/data" \
     python:3.12-alpine python3 /receiver.py \
@@ -205,6 +207,8 @@ log_info "Starting nginx target container: $NGINX_CONTAINER"
 docker run -d \
     --name "$NGINX_CONTAINER" \
     --network "$NETWORK_NAME" \
+    --log-opt max-size=20m \
+    --log-opt max-file=3 \
     nginx:alpine \
     || { log_error "Failed to start nginx"; exit 1; }
 
@@ -223,8 +227,14 @@ agent:
   cluster_id: "flowtest"
   node_name: "flowtest-node"
 
+  # ANCHOR: info-level logging - Bug: debug-level log grew to 9.4GB in one day - Aug 14, 2026
+  # The network/tcp_state eBPF programs attach globally to the HOST kernel, not just this
+  # test's own containers -- on a shared host running other real traffic, debug level logs
+  # every event system-wide with no rotation, exhausting disk. info is sufficient for this
+  # test's assertions (metrics + webhook events); the log-opts on the container below are a
+  # second safety net regardless of level.
   logging:
-    level: "debug"
+    level: "info"
     format: "json"
     output: "stdout"
 
@@ -309,6 +319,8 @@ docker run -d \
     --name "$AGENT_CONTAINER" \
     --network "$NETWORK_NAME" \
     --privileged \
+    --log-opt max-size=20m \
+    --log-opt max-file=3 \
     -v /sys/kernel/btf:/sys/kernel/btf:ro \
     -v /sys/kernel/debug:/sys/kernel/debug:ro \
     -v /sys/kernel/tracing:/sys/kernel/tracing:ro \
