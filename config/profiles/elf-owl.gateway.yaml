@@ -52,6 +52,13 @@ agent:
       enabled: false  # Optional; disable for minimal overhead
       buffer_size: 4096
       timeout: 5s
+    # ANCHOR: TCP state kprobe for gateway - Feature: kernel-accurate flow state transitions - Aug 14, 2026
+    # Reports real TCP state changes (SYN_SENT -> ESTABLISHED -> FIN/CLOSE) so flows don't
+    # stay stuck at "new"; critical for accurate gateway flow tracking.
+    tcp_state:
+      enabled: true
+      buffer_size: 4096
+      timeout: 5s
     perf_buffer:
       enabled: true
       page_count: 512  # Larger buffer for high-throughput gateways

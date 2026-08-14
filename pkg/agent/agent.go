@@ -404,6 +404,16 @@ func (a *Agent) Start(ctx context.Context) error {
 				BufferSize: a.Config.Agent.EBPF.TLS.BufferSize,
 				Timeout:    a.Config.Agent.EBPF.TLS.Timeout,
 			},
+			// ANCHOR: Wire TCPState into loadOpts - Bug: tcp_state program never loaded - Aug 14, 2026
+			// LoadOptions.TCPState previously defaulted to the Go zero value (Enabled=false) since
+			// this field was never populated from config, so programDefinitions() always skipped
+			// tcp_state regardless of config or DefaultLoadOptions(). This caused
+			// "tcp state program set is nil" at runtime and flows stuck permanently at "new".
+			TCPState: ebpf.ProgramConfig{
+				Enabled:    a.Config.Agent.EBPF.TCPState.Enabled,
+				BufferSize: a.Config.Agent.EBPF.TCPState.BufferSize,
+				Timeout:    a.Config.Agent.EBPF.TCPState.Timeout,
+			},
 			PerfBuffer: ebpf.PerfBufferOptions{
 				Enabled:     a.Config.Agent.EBPF.PerfBuffer.Enabled,
 				PageCount:   a.Config.Agent.EBPF.PerfBuffer.PageCount,
@@ -1438,10 +1448,14 @@ func generateEphemeralKey() (string, error) {
 func (a *Agent) handleTCPStateEvents(ctx context.Context) {
 	defer a.producerWg.Done()
 	if a.TCPStateMonitor == nil || a.FlowTracker == nil {
+		a.Logger.Warn("tcp state handler disabled: monitor or flow tracker is nil")
 		return
 	}
 
+	a.Logger.Info("tcp state event handler started")
 	eventChan := a.TCPStateMonitor.Events()
+	eventCount := 0
+
 	for {
 		select {
 		case event := <-eventChan:
@@ -1449,29 +1463,38 @@ func (a *Agent) handleTCPStateEvents(ctx context.Context) {
 				continue
 			}
 
+			eventCount++
+			a.Logger.Debug("tcp state event received",
+				zap.Int("total_events", eventCount),
+				zap.Uint32("raw_state", event.NewState),
+			)
+
 			// Map kernel TCP state to our flow state
 			flowState := network.TCPStateToFlowState(event.NewState)
 			if flowState == "" {
 				// Unknown or filtered state, skip
+				a.Logger.Debug("skipping unknown tcp state", zap.Uint32("state", event.NewState))
 				continue
 			}
 
 			// Log state transition with human-readable names
-			a.Logger.Debug("tcp state transition detected",
+			a.Logger.Info("tcp state transition detected",
 				zap.String("new_state", network.TCPStateName(event.NewState)),
 				zap.String("flow_state", network.FlowStateName(flowState)),
 			)
 
 			// Note: In a future enhancement, we would:
-			// 1. Extract 4-tuple from the kprobe context  
+			// 1. Extract 4-tuple from the kprobe context
 			// 2. Look up the flow in the flow tracker
 			// 3. Update its state
 			// For now, this demonstrates the integration point and metrics
 			a.MetricsRegistry.RecordEventProcessed()
 
 		case <-a.done:
+			a.Logger.Debug("tcp state handler shutting down", zap.Int("events_processed", eventCount))
 			return
 		case <-ctx.Done():
+			a.Logger.Debug("tcp state handler context cancelled", zap.Int("events_processed", eventCount))
 			return
 		}
 	}

@@ -37,22 +37,26 @@ func NewTCPStateMonitor(logger *zap.Logger, programSet *ProgramSet) (*TCPStateMo
 	}
 
 	if programSet == nil {
-		return nil, fmt.Errorf("invalid program set for tcp state monitor")
+		logger.Warn("tcp state program set is nil, tcp state tracking disabled")
+		return nil, nil
 	}
 
 	// Get the tcp_state_events map
 	eventsMap := programSet.Maps["tcp_state_events"]
 	if eventsMap == nil {
-		logger.Warn("tcp_state_events map not found, tcp state tracking disabled")
+		logger.Warn("tcp_state_events map not found in program set, tcp state tracking disabled")
 		return nil, nil
 	}
 
 	// Create ringbuf reader for tcp_state_events
 	reader, err := ringbuf.NewReader(eventsMap)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create ringbuf reader for tcp state events: %w", err)
+		logger.Warn("failed to create ringbuf reader for tcp state events",
+			zap.Error(err))
+		return nil, nil
 	}
 
+	logger.Debug("tcp state monitor reader created successfully")
 	return &TCPStateMonitor{
 		Logger:       logger,
 		programSet:   programSet,
@@ -85,18 +89,21 @@ func (m *TCPStateMonitor) Stop() error {
 
 // readEvents reads and processes TCP state events from kernel
 func (m *TCPStateMonitor) readEvents() {
+	readCount := 0
 	for {
 		select {
 		case <-m.stopChan:
+			m.Logger.Debug("tcp state event reader shutting down", zap.Int("events_read", readCount))
 			return
 		default:
 		}
 
 		record, err := m.reader.Read()
 		if err != nil {
-			m.Logger.Error("failed to read tcp state event", zap.Error(err))
+			m.Logger.Debug("failed to read tcp state event", zap.Error(err))
 			continue
 		}
+		readCount++
 
 		// Parse event from ringbuf
 		var event TCPStateEvent

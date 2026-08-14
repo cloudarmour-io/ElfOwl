@@ -100,8 +100,11 @@ type EBPFConfig struct {
 	File          EBPFFileConfig    `yaml:"file"`
 	Capability    EBPFMonitorConfig `yaml:"capability"`
 	TLS           EBPFMonitorConfig `yaml:"tls"`
-	PerfBuffer    PerfBufferConfig  `yaml:"perf_buffer"`
-	RingBuffer    RingBufferConfig  `yaml:"ring_buffer"`
+	// ANCHOR: TCPState config - Feature: kernel TCP state tracking - Aug 14, 2026
+	// Controls the tcp_set_state kprobe that reports kernel-accurate flow state transitions.
+	TCPState   EBPFMonitorConfig `yaml:"tcp_state"`
+	PerfBuffer PerfBufferConfig  `yaml:"perf_buffer"`
+	RingBuffer RingBufferConfig  `yaml:"ring_buffer"`
 }
 
 // EBPFMonitorConfig defines individual Cilium/eBPF monitor settings
@@ -535,6 +538,11 @@ func DefaultConfig() *Config {
 					Timeout:    5 * time.Second,
 				},
 				TLS: EBPFMonitorConfig{
+					Enabled:    true,
+					BufferSize: 4096,
+					Timeout:    5 * time.Second,
+				},
+				TCPState: EBPFMonitorConfig{
 					Enabled:    true,
 					BufferSize: 4096,
 					Timeout:    5 * time.Second,
