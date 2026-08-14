@@ -4,19 +4,32 @@
 # so the test script can grep it for flow_summary events with non-"new" states.
 
 import http.server
+import os
 import socketserver
 
 PORT = 8888
 LOG_PATH = "/data/events.log"
+# ANCHOR: Hard cap on captured event log - Bug: 24GB directory growth on a shared host - Aug 14, 2026
+# The network/tcp_state eBPF programs attach to the HOST kernel, not just this test's own
+# containers -- on a busy shared host, real ambient traffic alone produced 44,803 flows from a
+# 10-request test run. The test only needs to observe a handful of non-"new" states to pass;
+# once the log is large enough to have almost certainly captured that, stop writing (still
+# return 200 so the agent's webhook push doesn't error/retry-storm).
+MAX_LOG_BYTES = 50 * 1024 * 1024  # 50MB
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(length)
-        with open(LOG_PATH, "ab") as f:
-            f.write(body)
-            f.write(b"\n")
+        try:
+            current_size = os.path.getsize(LOG_PATH)
+        except OSError:
+            current_size = 0
+        if current_size < MAX_LOG_BYTES:
+            with open(LOG_PATH, "ab") as f:
+                f.write(body)
+                f.write(b"\n")
         self.send_response(200)
         self.end_headers()
         self.wfile.write(b"{}")
