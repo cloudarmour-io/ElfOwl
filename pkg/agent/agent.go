@@ -50,6 +50,14 @@ type MetricsRecorder interface {
 	RecordHostEventDiscarded()
 	RecordK8sLookupFailedDiscarded()
 	SetEventsBuffered(count int)
+	// ANCHOR: Flow metrics - Bug: elf_owl_flows_created_total/closed_total never incremented - Aug 14, 2026
+	// metrics.Registry already implements RecordFlowCreated/RecordFlowClosed/SetFlowsActive, but
+	// they were never declared here, so agent.go had no way to call them through this interface
+	// and the flow-tracking code path never recorded them. Flows were created/closed correctly
+	// in-memory (confirmed via debug logs) but the Prometheus counters stayed at zero forever.
+	RecordFlowCreated()
+	RecordFlowClosed(reason string)
+	SetFlowsActive(count int)
 }
 
 // Agent is the main compliance observer agent
@@ -711,6 +719,10 @@ func (a *Agent) handleRuntimeEvent(
 					zap.String("state_source", enrichedEvent.Network.ConnectionState),
 					zap.Bool("is_new", isNewFlow),
 				)
+				// ANCHOR: Record flow creation metric - Bug: elf_owl_flows_created_total never incremented - Aug 14, 2026
+				if isNewFlow {
+					a.MetricsRegistry.RecordFlowCreated()
+				}
 			}
 		}
 	}
@@ -1105,6 +1117,13 @@ func (a *Agent) collectMetrics(ctx context.Context) {
 				zap.Int64("violations_found", violations),
 			)
 
+			// ANCHOR: Sync flow tracker gauge to Prometheus - Bug: elf_owl_flows_active never set - Aug 14, 2026
+			// SetFlowsActive existed on metrics.Registry but was never called; FlowTracker.Stats()
+			// already tracks ActiveFlows, so refresh the gauge on the same periodic tick.
+			if a.FlowTracker != nil {
+				a.MetricsRegistry.SetFlowsActive(a.FlowTracker.Stats().ActiveFlows)
+			}
+
 		case <-a.done:
 			return
 
@@ -1153,6 +1172,9 @@ func (a *Agent) startFlowSummaryEmitter(ctx context.Context) {
 			if a.WebhookPusher != nil {
 				a.WebhookPusher.SendFlowSummary(flowSummary)
 			}
+
+			// ANCHOR: Record flow closure metric - Bug: elf_owl_flows_closed_total never incremented - Aug 14, 2026
+			a.MetricsRegistry.RecordFlowClosed(closedFlow.CloseReason)
 
 			a.Logger.Debug("flow closed",
 				zap.String("flow_key", closedFlow.Key.String()),
