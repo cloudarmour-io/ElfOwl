@@ -42,6 +42,29 @@ func TCPStateToFlowState(tcpState uint32) FlowState {
 	}
 }
 
+// ANCHOR: ConnectionState name to FlowState mapping - Bug: flows stuck at "new" - Aug 14, 2026
+// pkg/agent/agent.go previously cast NetworkContext.ConnectionState (an uppercase kernel
+// state name like "ESTABLISHED", produced by network_monitor.go's tcpStateName) directly to
+// FlowState via network.FlowState(name). FlowState constants are lowercase ("established",
+// "new", ...), so that cast never matched a real constant and stored the raw kernel name into
+// flow.State instead of transitioning the 4-state machine. FlowStateFromName translates the
+// display name to the correct FlowState, returning "" for names that carry no meaningful
+// transition (LISTEN, UNKNOWN, "") so callers can leave an existing flow's state untouched.
+func FlowStateFromName(name string) FlowState {
+	switch name {
+	case "SYN_SENT", "SYN_RECV", "NEW_SYN_RECV":
+		return FlowStateNEW
+	case "ESTABLISHED":
+		return FlowStateESTABLISHED
+	case "FIN_WAIT1", "FIN_WAIT2", "CLOSE_WAIT", "LAST_ACK", "CLOSING":
+		return FlowStateCLOSING
+	case "TIME_WAIT", "CLOSE":
+		return FlowStateCLOSED
+	default: // LISTEN, UNKNOWN, ""
+		return ""
+	}
+}
+
 // TCPStateName returns human-readable name for TCP state constant
 func TCPStateName(state uint32) string {
 	switch state {

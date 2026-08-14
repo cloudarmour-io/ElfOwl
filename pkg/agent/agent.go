@@ -667,37 +667,51 @@ func (a *Agent) handleRuntimeEvent(
 	// ANCHOR: Flow tracking for network events - Feature: bidirectional flow correlation - Jul 18, 2026
 	// After enrichment, correlate network events into bidirectional flows and populate flow fields.
 	if enrichedEvent != nil && enrichedEvent.Network != nil && a.FlowTracker != nil {
-		// ANCHOR: Flow state determination - Feature: conntrack-style state tracking - Jul 22, 2026
-		// Map connection state to flow state, defaulting to NEW for initial events.
-		// For now, all incoming events are treated as NEW or ESTABLISHED.
-		// Future phases will implement full state machine from TCP flags/netlink events.
-		flowStateValue := network.FlowStateNEW
-		if enrichedEvent.Network.ConnectionState != "" {
-			flowStateValue = network.FlowState(enrichedEvent.Network.ConnectionState)
-		}
+		// ANCHOR: Skip incomplete tcp_connect events - Bug: port=0 orphan flow entries - Aug 14, 2026
+		// tcp/tcp_connect (network.c) fires before the local port is assigned on this kernel,
+		// so its event always carries SourcePort=0. Tracking it creates a flow keyed on port 0
+		// that can never match the later inet_sock_set_state events for the same connection
+		// (which carry the real port), leaving an orphan flow permanently stuck at "new".
+		// inet_sock_set_state's own SYN_SENT event carries the real port and creates the flow
+		// correctly, so tcp_connect's placeholder event is redundant for flow tracking. Only
+		// flow correlation is skipped here — rule matching/webhook delivery below still runs.
+		if !(enrichedEvent.Network.Protocol == "tcp" && enrichedEvent.Network.SourcePort == 0) {
+			// ANCHOR: Flow state determination - Bug: uppercase/lowercase cast never matched - Aug 14, 2026
+			// ConnectionState holds an uppercase kernel state name (e.g. "ESTABLISHED", from
+			// network_monitor.go's tcpStateName), which does not equal any lowercase FlowState
+			// constant. Casting it directly (network.FlowState(name)) stored the raw kernel name
+			// into flow.State instead of transitioning the 4-state machine, so flows appeared
+			// permanently stuck at "new". FlowStateFromName performs the correct translation and
+			// returns "" for names with no meaningful transition (LISTEN/UNKNOWN), in which case
+			// we keep the default NEW for a brand-new flow rather than fabricate a state.
+			flowStateValue := network.FlowStateNEW
+			if mapped := network.FlowStateFromName(enrichedEvent.Network.ConnectionState); mapped != "" {
+				flowStateValue = mapped
+			}
 
-		// Call FlowTracker.AddOrUpdateFlow() to correlate events into bidirectional flows
-		flowKey, isNewFlow, flowState := a.FlowTracker.AddOrUpdateFlow(
-			enrichedEvent.Network.SourceIP,
-			enrichedEvent.Network.DestinationIP,
-			enrichedEvent.Network.SourcePort,
-			enrichedEvent.Network.DestinationPort,
-			enrichedEvent.Network.Protocol,
-			enrichedEvent.Network.NetworkNamespaceID,
-			0, // bytes - will be set to 0 for now (can be extended with packet size in future)
-			flowStateValue,
-		)
-
-		// Populate flow fields in NetworkContext
-		if flowKey != nil {
-			enrichedEvent.Network.FlowID = flowKey.String()
-			enrichedEvent.Network.IsReversed = false // Will be set by FlowTracker in future phases
-			a.Logger.Debug("flow tracked",
-				zap.String("flow_id", enrichedEvent.Network.FlowID),
-				zap.String("flow_state", string(flowState)),
-				zap.String("state_source", enrichedEvent.Network.ConnectionState),
-				zap.Bool("is_new", isNewFlow),
+			// Call FlowTracker.AddOrUpdateFlow() to correlate events into bidirectional flows
+			flowKey, isNewFlow, flowState := a.FlowTracker.AddOrUpdateFlow(
+				enrichedEvent.Network.SourceIP,
+				enrichedEvent.Network.DestinationIP,
+				enrichedEvent.Network.SourcePort,
+				enrichedEvent.Network.DestinationPort,
+				enrichedEvent.Network.Protocol,
+				enrichedEvent.Network.NetworkNamespaceID,
+				0, // bytes - will be set to 0 for now (can be extended with packet size in future)
+				flowStateValue,
 			)
+
+			// Populate flow fields in NetworkContext
+			if flowKey != nil {
+				enrichedEvent.Network.FlowID = flowKey.String()
+				enrichedEvent.Network.IsReversed = false // Will be set by FlowTracker in future phases
+				a.Logger.Debug("flow tracked",
+					zap.String("flow_id", enrichedEvent.Network.FlowID),
+					zap.String("flow_state", string(flowState)),
+					zap.String("state_source", enrichedEvent.Network.ConnectionState),
+					zap.Bool("is_new", isNewFlow),
+				)
+			}
 		}
 	}
 
