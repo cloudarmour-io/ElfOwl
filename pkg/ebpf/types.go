@@ -20,6 +20,7 @@ const (
 	CapabilityProgramName = "capability"
 	DNSProgramName        = "dns"
 	TLSProgramName        = "tls"
+	TCPStateProgramName   = "tcp_state"
 )
 
 // ============================================================================
@@ -33,6 +34,7 @@ const (
 	CapabilityEventsMap = "capability_events"
 	DNSEventsMap        = "dns_events"
 	TLSEventsMap        = "tls_events"
+	TCPStateEventsMap   = "tcp_state_events"
 )
 
 // ============================================================================

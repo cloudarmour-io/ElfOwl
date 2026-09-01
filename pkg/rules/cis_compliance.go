@@ -5,7 +5,7 @@ package rules
 
 // CISControls contains runtime-detectable CIS Kubernetes controls.
 
-var CISControls = []*Rule{
+var CISCompliance = []*Rule{
 	// ===== AUTOMATED CONTROLS =====
 
 	// CIS 4.5.1: Minimize the admission of privileged containers
@@ -751,3 +751,8 @@ var CISControls = []*Rule{
 		},
 	},
 }
+
+// ANCHOR: Backward compatibility alias - Feature: rule separation - Jul 18, 2026
+// CISControls is kept for backward compatibility with existing code.
+// New code should use CISCompliance directly.
+var CISControls = CISCompliance

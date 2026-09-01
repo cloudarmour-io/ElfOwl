@@ -152,15 +152,15 @@ func (nm *NetworkMonitor) eventLoop(ctx context.Context) {
 				continue
 			}
 
-			sourceIP, destinationIP := networkIPs(evt)
+			sourceIP, destinationIP := NetworkIPs(evt)
 			netCtx := &enrichment.NetworkContext{
 				SourceIP:           sourceIP,
 				DestinationIP:      destinationIP,
 				SourcePort:         evt.SPort,
 				DestinationPort:    evt.DPort,
 				Protocol:           protocol,
-				Direction:          networkDirection(evt.Direction),
-				ConnectionState:    tcpStateName(evt.State),
+				Direction:          NetworkDirection(evt.Direction),
+				ConnectionState:    TCPStateName(evt.State),
 				NetworkNamespaceID: evt.NetNS,
 			}
 
@@ -195,7 +195,11 @@ func (nm *NetworkMonitor) eventLoop(ctx context.Context) {
 
 // ANCHOR: Network direction/state mapping - Feature: advanced telemetry - Mar 25, 2026
 // Converts kernel numeric enums to human-readable strings for enrichment.
-func networkDirection(direction uint8) string {
+// ANCHOR: Exported for reuse by enrichment backends - Bug: bare-metal enricher stub discarded raw event fields - Aug 14, 2026
+// NetworkDirection/TCPStateName/NetworkIPs were private to package ebpf, so
+// BareMetalEnricher.EnrichNetworkEvent (pkg/enrichment/backends) could not reuse this exact
+// field mapping and instead left NetworkContext hardcoded to placeholder zero values.
+func NetworkDirection(direction uint8) string {
 	switch direction {
 	case 1:
 		return "outbound"
@@ -206,7 +210,7 @@ func networkDirection(direction uint8) string {
 	}
 }
 
-func tcpStateName(state uint8) string {
+func TCPStateName(state uint8) string {
 	switch state {
 	case 1:
 		return "ESTABLISHED"
@@ -237,7 +241,7 @@ func tcpStateName(state uint8) string {
 	}
 }
 
-func networkIPs(evt *NetworkEvent) (string, string) {
+func NetworkIPs(evt *NetworkEvent) (string, string) {
 	if evt.Family == AF_INET6 {
 		return net.IP(evt.SAddrV6[:]).String(), net.IP(evt.DAddrV6[:]).String()
 	}

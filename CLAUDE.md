@@ -1,22 +1,151 @@
 # elf-owl Development Guide for Claude
 
-**Version:** 1.0.0
-**Date:** December 27, 2025
-**Project:** elf-owl - Kubernetes Compliance Agent with eBPF Event Enrichment
-**Status:** Week 3 - Active Development
+**Version:** 2.0.0
+**Date:** July 18, 2026
+**Project:** elf-owl - Network-Behavior-Centric Gateway/Firewall Monitoring Platform with Optional Kubernetes Compliance
+**Status:** Phase 8 Complete - Core Architecture Operational (18/25 tasks)
+
+---
+
+## Overview
+
+elf-owl is a **network-behavior-centric monitoring platform** optimized for firewall, gateway, and enterprise network deployments. It provides:
+
+- **Bidirectional flow tracking** with conntrack-style correlation and 4-state machine
+- **Network anomaly detection** (DDoS, port scanning, data exfiltration, tunneling)
+- **Pluggable enrichment backends** (bare-metal, Kubernetes, extensible to cloud)
+- **Dual-mode rule engine** (network-behavior OR compliance OR both)
+- **Environment-agnostic architecture** (Gateway, Bare-Metal, VM, K8s deployments)
+
+The platform evolved from a Kubernetes-centric compliance agent to a general-purpose network behavior monitor with optional CIS Kubernetes v1.8 compliance validation.
 
 ---
 
 ## Table of Contents
 
-1. [Code Changes Workflow](#code-changes-workflow)
-2. [Anchor Comments Requirement](#anchor-comments-requirement)
-3. [Git Commit Message Types](#git-commit-message-types)
-4. [Code Review Standards](#code-review-standards)
-5. [Project Structure & Key Files](#project-structure--key-files)
-6. [Development Workflow](#development-workflow)
-7. [Important Constraints](#important-constraints)
-8. [Common Development Tasks](#common-development-tasks)
+1. [Network-Behavior-Centric Design](#network-behavior-centric-design)
+2. [Deployment Modes](#deployment-modes)
+3. [Flow Tracking Architecture](#flow-tracking-architecture)
+4. [Code Changes Workflow](#code-changes-workflow)
+5. [Anchor Comments Requirement](#anchor-comments-requirement)
+6. [Git Commit Message Types](#git-commit-message-types)
+7. [Code Review Standards](#code-review-standards)
+8. [Project Structure & Key Files](#project-structure--key-files)
+9. [Development Workflow](#development-workflow)
+10. [Important Constraints](#important-constraints)
+11. [Common Development Tasks](#common-development-tasks)
+
+---
+
+## Network-Behavior-Centric Design
+
+### Core Principles
+
+1. **Environment-Agnostic Core**: Network flow tracking and anomaly detection work across any deployment (gateway, bare-metal, VM, Kubernetes)
+2. **Pluggable Enrichment**: Backend-specific context (K8s pod, host process, cloud metadata) is optional and swappable
+3. **Bidirectional Flow Correlation**: Events are correlated into bidirectional flows using canonical tuple matching (conntrack-style)
+4. **Dual-Mode Rules**: Support network-behavior detection OR compliance checking OR both simultaneously
+5. **Flow State Machine**: Simplified 4-state machine (NEW → ESTABLISHED → CLOSING → CLOSED) for firewall operators
+
+### Key Components
+
+- **Flow Tracker** (`pkg/network/flow_tracker.go`): Bidirectional flow correlation with TTL-based expiry and memory limits
+- **Enrichment Interface** (`pkg/enrichment/enricher.go`): Backend-agnostic interface for context injection
+- **Enrichment Backends** (`pkg/enrichment/backends/`):
+  - `baremetal_enricher.go`: Hostname, process, OS context via /proc and reverse DNS
+  - `k8s_enricher.go`: Pod, service account, RBAC, network policy context
+- **Dual-Mode Rule Engine** (`pkg/rules/engine.go`): Mode-aware matching (network-behavior, compliance, dual)
+- **Network Behavior Rules** (`pkg/rules/network_behavior.go`): 5 anomaly detection rules (DDoS, port scan, exfil, tunnel, connection retry)
+- **Compliance Rules** (`pkg/rules/cis_compliance.go`): 48 CIS Kubernetes v1.8 controls (moved from hardcoded)
+
+---
+
+## Deployment Modes
+
+### Gateway Profile (`config/profiles/elf-owl.gateway.yaml`)
+- **Rule Mode**: network-behavior (anomaly detection only)
+- **Enrichment**: bare-metal (hostname, process, OS context)
+- **Resource Profile**: Gateway-optimized (16KB network buffer, minimal overhead)
+- **Use Case**: Firewalls, network gateways, SOHO devices
+
+### Bare-Metal Profile (`config/profiles/elf-owl.baremetal.yaml`)
+- **Rule Mode**: network-behavior (anomaly detection only)
+- **Enrichment**: bare-metal (hostname, process, SELinux context)
+- **Resource Profile**: High-performance (32KB network buffer, 1K perf pages, extended caches)
+- **Use Case**: Dedicated bare-metal monitoring servers
+
+### VM Profile (`config/profiles/elf-owl.vm.yaml`)
+- **Rule Mode**: network-behavior (anomaly detection only)
+- **Enrichment**: bare-metal (minimal: no reverse DNS or process lookup)
+- **Resource Profile**: Minimal (4KB network buffer, 64 perf pages, short caches)
+- **Use Case**: Resource-constrained VMs and containers
+
+### Kubernetes Profile (`config/profiles/elf-owl.kubernetes.yaml`)
+- **Rule Mode**: compliance (CIS Kubernetes v1.8 controls)
+- **Enrichment**: kubernetes (full pod, RBAC, network policy context)
+- **Resource Profile**: Moderate (16KB buffers, 512 perf pages, K8s API integration)
+- **Use Case**: K8s DaemonSet deployments, compliance audits
+
+### Comprehensive Profile (`config/profiles/elf-owl.comprehensive.yaml`)
+- **Rule Mode**: dual (both network-behavior AND compliance)
+- **Enrichment**: kubernetes (full context for both rule sets)
+- **Resource Profile**: Maximum (32KB buffers, 2K perf pages, all monitors enabled)
+- **Use Case**: High-security environments requiring defense-in-depth
+
+---
+
+## Flow Tracking Architecture
+
+### Flow State Machine (4 States)
+
+```
+NEW
+  ↓
+ESTABLISHED
+  ↓
+CLOSING
+  ↓
+CLOSED
+```
+
+- **NEW**: SYN_SENT, SYN_RECV (pending connection establishment)
+- **ESTABLISHED**: Bidirectional data flow (connection fully established)
+- **CLOSING**: FIN_WAIT1, FIN_WAIT2, CLOSE_WAIT, LAST_ACK (graceful shutdown)
+- **CLOSED**: Fully terminated (can be removed from tracking)
+
+### Flow Key (Bidirectional Tuple)
+
+```go
+type FlowKey struct {
+    IP1      string // Canonical: min(src, dst)
+    Port1    uint16 // Port for IP1
+    IP2      string // Canonical: max(src, dst)
+    Port2    uint16 // Port for IP2
+    Protocol string // tcp, udp, icmp, etc.
+    NetnsID  uint32 // Network namespace
+}
+```
+
+Canonical ordering ensures `src→dst` and `dst→src` events map to the same flow.
+
+### Flow Tracking Configuration
+
+- **ActiveTTL**: Time before idle flow is expired (default: 30min gateway, 60min LB, 10min VM)
+- **MaxActiveFlows**: Maximum concurrent tracked flows (default: 500k)
+- **MemoryLimitMB**: Memory budget for flow tracking (default: 256MB)
+- **Eviction Policy**: LRU (least recently used) when limits exceeded
+
+### Metrics Exported
+
+- `elf_owl_flows_active`: Current active flow count
+- `elf_owl_flows_created_total`: Total flows created
+- `elf_owl_flows_closed_total`: Closed flows by reason (fin, reset, timeout, evicted)
+- `elf_owl_flow_bytes_transferred`: Bytes per flow histogram
+- `elf_owl_anomalies_detected_total`: Network anomalies detected
+- `elf_owl_ddos_floods_detected_total`: DDoS flood events
+- `elf_owl_port_scans_detected_total`: Port scan events
+- `elf_owl_data_exfiltration_suspected_total`: Data exfiltration suspicions
+- `elf_owl_tunnels_detected_total`: Long-lived tunnel detections
 
 ---
 
@@ -240,7 +369,7 @@ Fixes: #74
 
 ## Project Structure & Key Files
 
-### Core Directories
+### Core Directories (Updated for Network-Behavior Architecture)
 
 ```
 elf-owl/
@@ -249,22 +378,37 @@ elf-owl/
 │
 ├── pkg/
 │   ├── agent/                   # Core agent orchestration
-│   │   ├── agent.go             # Main agent loop
-│   │   └── config.go            # Configuration types
+│   │   ├── agent.go             # Main agent loop with backend selection
+│   │   ├── config.go            # Configuration types (RulesConfig.Mode, EnrichmentBackendConfig)
+│   │   └── webhook.go           # Webhook pusher with FlowSummaryEvent support
 │   │
-│   ├── enrichment/              # Event enrichment pipeline
-│   │   ├── types.go             # Data structures (700+ LOC)
-│   │   └── enricher.go          # Enrichment logic (300+ LOC)
+│   ├── network/                 # Network flow tracking (NEW)
+│   │   ├── flow_tracker.go      # Bidirectional flow correlation (327 LOC)
+│   │   │   └── 4-state machine, TTL-based expiry, LRU eviction, flow metrics
+│   │   └── flow_tracker_test.go # Flow tracker unit tests
 │   │
-│   ├── rules/                   # Rule engine & CIS mappings
-│   │   ├── engine.go            # Rule matching engine (300+ LOC)
-│   │   ├── cis_mappings.go      # 48 CIS control definitions (600+ LOC)
-│   │   ├── loader.go            # Rule loading from files/ConfigMaps
+│   ├── enrichment/              # Pluggable event enrichment backends
+│   │   ├── enricher.go          # Enricher interface (backend-agnostic)
+│   │   ├── types.go             # Data structures (NetworkContext with flow fields)
+│   │   ├── k8s_enricher.go      # Kubernetes enrichment implementation
+│   │   └── backends/            # Backend implementations (NEW)
+│   │       ├── baremetal_enricher.go    # Bare-metal enrichment (hostname, process, SELinux)
+│   │       ├── baremetal_config.go      # Bare-metal configuration
+│   │       ├── baremetal_enricher_test.go
+│   │       ├── k8s_enricher.go   # K8s backend wrapper
+│   │       ├── k8s_config.go     # K8s backend configuration
+│   │       └── k8s_enricher_test.go
+│   │
+│   ├── rules/                   # Dual-mode rule engine
+│   │   ├── engine.go            # Rule matching engine (mode-aware)
+│   │   ├── cis_compliance.go    # 48 CIS Kubernetes v1.8 controls (NEW, moved from cis_mappings)
+│   │   ├── network_behavior.go  # 5 network behavior anomaly detection rules (NEW)
+│   │   ├── loader.go            # Mode-aware rule loading (LoadNetworkBehaviorRules, LoadComplianceRules, LoadDualModeRules)
 │   │   ├── engine_test.go       # Rule engine tests
 │   │   ├── loader_test.go       # Loader tests
 │   │   └── integration_test.go  # Integration tests
 │   │
-│   ├── kubernetes/              # K8s metadata client
+│   ├── kubernetes/              # K8s metadata client (legacy, now via enrichment backend)
 │   │   ├── client.go            # K8s API client (600+ LOC)
 │   │   └── cache.go             # Metadata cache (200+ LOC)
 │   │
@@ -277,10 +421,10 @@ elf-owl/
 │   │   └── client.go            # API communication
 │   │
 │   ├── config/                  # Configuration
-│   │   └── types.go             # Config structures
+│   │   └── types.go             # Config structures (Mode, EnrichmentBackendConfig)
 │   │
 │   ├── metrics/                 # Prometheus metrics
-│   │   └── prometheus.go        # Metrics definitions
+│   │   └── prometheus.go        # Flow tracking + anomaly detection metrics
 │   │
 │   └── logger/                  # Structured logging
 │       └── logger.go            # Zap logger setup
@@ -290,9 +434,16 @@ elf-owl/
 │   └── architecture.md          # Architecture overview
 │
 ├── config/
-│   ├── elf-owl.yaml             # Default configuration
+│   ├── elf-owl.yaml             # Legacy default configuration
+│   ├── profiles/                # Deployment profiles (NEW)
+│   │   ├── elf-owl.gateway.yaml       # Gateway deployment (network-behavior, bare-metal)
+│   │   ├── elf-owl.baremetal.yaml     # Bare-metal deployment (network-behavior, high-perf)
+│   │   ├── elf-owl.vm.yaml            # VM deployment (network-behavior, minimal resources)
+│   │   ├── elf-owl.kubernetes.yaml    # Kubernetes deployment (compliance, K8s enrichment)
+│   │   └── elf-owl.comprehensive.yaml # Comprehensive deployment (dual-mode, maximum resources)
 │   └── rules/                   # Rule definitions
-│       └── cis-controls.yaml    # CIS control rules (YAML)
+│       ├── network-behavior.yaml # Network behavior anomaly detection rules (NEW)
+│       └── cis-compliance.yaml   # CIS control compliance rules (NEW)
 │
 ├── deploy/
 │   ├── helm/                    # Helm chart
@@ -305,38 +456,46 @@ elf-owl/
 
 ### Key File Descriptions
 
-#### `pkg/enrichment/types.go` (700+ LOC)
-- **Purpose:** Data structures for enriched events
+#### `pkg/network/flow_tracker.go` (327 LOC) - NEW
+- **Purpose:** Bidirectional flow correlation and state tracking
 - **Key Types:**
-  - `EnrichedEvent` - Main event structure with all context
-  - `K8sContext` - Kubernetes pod and cluster metadata (40+ fields)
-  - `ContainerContext` - Container security context
-  - `ProcessContext` - Process execution details
-  - `FileContext` - File operation context
-  - `NetworkContext` - Network event details
-  - `DNSContext` - DNS query details
-  - `CapabilityContext` - Linux capability info
-
-#### `pkg/enrichment/enricher.go` (300+ LOC)
-- **Purpose:** Enrich events with Kubernetes metadata
+  - `FlowKey` - Canonical tuple (IP1, Port1, IP2, Port2, Protocol, NetnsID)
+  - `FlowState` - Enum: NEW, ESTABLISHED, CLOSING, CLOSED
+  - `FlowRecord` - Flow state, bytes, packets, timestamps, close reason
+  - `FlowTracker` - Active flow management with TTL and LRU eviction
 - **Key Functions:**
-  - `EnrichProcessEvent()` - Add K8s context to process events
-  - `EnrichNetworkEvent()` - Add K8s context to network events
-  - `EnrichFileEvent()` - Add K8s context to file events
-- **Integration:** Uses K8s client and cache for metadata lookup
+  - `AddOrUpdateFlow()` - Create or update bidirectional flow
+  - `CloseFlow()` - Mark flow as closed with reason
+  - `ExpireOldFlows()` - TTL-based flow expiry
+- **Features:** Canonical ordering for order-independent matching, LRU eviction when limits exceeded, emits closed flows to channel
 
-#### `pkg/rules/engine.go` (300+ LOC)
-- **Purpose:** Match events against CIS control rules
+#### `pkg/enrichment/enricher.go` - Backend-Agnostic Interface (NEW)
+- **Purpose:** Define pluggable enrichment interface
+- **Key Interface:**
+  - `Enricher` - Backend-agnostic interface with methods for all event types
+  - `EnrichmentCapabilities` - Report backend capabilities
+- **Implementations:** K8sEnricher, BareMetalEnricher
+
+#### `pkg/enrichment/backends/baremetal_enricher.go` (370+ LOC) - NEW
+- **Purpose:** Bare-metal event enrichment (hostname, process, SELinux)
 - **Key Functions:**
-  - `NewEngine()` - Create engine with fallback rule loading
-  - `Match()` - Match event against all rules
-  - `evaluateCondition()` - Evaluate single condition
-  - `extractField()` - Extract field from event (40+ fields)
-- **Operators:** equals, not_equals, contains, in, greater_than, less_than
+  - `EnrichNetworkEvent()` - Add hostname, process info, user context, SELinux
+  - `reverseDNS()` - Reverse DNS lookup with caching
+  - `lookupProcessInfo()` - Extract process info from /proc
+  - `readSELinuxContext()` - Read SELinux context
+- **Features:** Hostname and process info caching with configurable TTLs
 
-#### `pkg/rules/cis_mappings.go` (600+ LOC)
+#### `pkg/rules/engine.go` - Dual-Mode Rule Engine
+- **Purpose:** Mode-aware rule matching (network-behavior, compliance, dual)
+- **Key Additions:**
+  - `Mode` field: RuleModeBehavior, RuleModeCompliance, RuleModeDual
+  - `NewEngineWithMode()` - Factory function for mode-specific engine
+- **Behavior:** Loads appropriate rule sets based on mode
+
+#### `pkg/rules/cis_compliance.go` (600+ LOC) - NEW
 - **Purpose:** Define all 48 automated CIS Kubernetes v1.8 controls
 - **Structure:** Array of `Rule` objects with conditions
+- **Variable:** `CISCompliance` (backward-compatible alias: `CISControls`)
 - **Rule Categories:**
   - Pod Security Context (8 rules: CIS 4.2.x)
   - Container Image & Registry (6 rules: CIS 4.3.x)
@@ -345,8 +504,24 @@ elf-owl/
   - RBAC & Access Controls (10 rules: CIS 5.x.x)
   - Advanced Security Context (9 rules: CIS 4.7-4.9)
 
+#### `pkg/rules/network_behavior.go` (120+ LOC) - NEW
+- **Purpose:** Network anomaly detection rules
+- **Rules:**
+  - NET_BEHAVIOR_001: DDoS Flood Detection (high-volume connections/packets)
+  - NET_BEHAVIOR_002: Data Exfiltration Suspected (large outbound data transfer)
+  - NET_BEHAVIOR_003: Persistent Tunnel or Long-Lived Connection (sustained connections)
+  - NET_BEHAVIOR_004: Unusual Protocol Combination (protocol mismatch anomalies)
+  - NET_BEHAVIOR_005: Rapid Connection Retries (excessive retries indicating issues/attacks)
+- **Variable:** `NetworkBehavior`
+
+#### `pkg/rules/loader.go` - Mode-Aware Rule Loading
+- **New Functions:**
+  - `LoadNetworkBehaviorRules()` - File → ConfigMap → hardcoded fallback
+  - `LoadComplianceRules()` - File → ConfigMap → hardcoded fallback
+  - `LoadDualModeRules()` - Combines both rule sets
+
 #### `pkg/kubernetes/client.go` (600+ LOC)
-- **Purpose:** K8s API client for metadata extraction
+- **Purpose:** K8s API client for metadata extraction (now backend, optional)
 - **Key Functions:**
   - `GetPodMetadata()` - Retrieve pod spec and status
   - `GetNetworkPolicyStatus()` - Evaluate network policies
@@ -354,39 +529,56 @@ elf-owl/
   - `GetRBACLevel()` - Calculate privilege escalation level
   - `selectorMatches()` - Label selector matching with MatchExpressions
 
-#### `pkg/rules/loader.go`
-- **Purpose:** Load rules from files and ConfigMaps
-- **Key Functions:**
-  - `LoadRulesFromFile()` - Load from YAML file
-  - `LoadRulesFromConfigMap()` - Load from K8s ConfigMap
-  - `ConvertYAMLToRule()` - Parse YAML into Rule objects
+#### Configuration Profiles (NEW)
+- **gateway.yaml** - Network-behavior mode, bare-metal enrichment, gateway-optimized
+- **baremetal.yaml** - Network-behavior mode, bare-metal enrichment, high-performance
+- **vm.yaml** - Network-behavior mode, bare-metal enrichment, minimal resources
+- **kubernetes.yaml** - Compliance mode, K8s enrichment, CIS control validation
+- **comprehensive.yaml** - Dual-mode (behavior + compliance), K8s enrichment, maximum resources
 
 ### Critical Implementation Details
 
+#### Bidirectional Flow Tracking
+
+1. **Flow Key Canonicalization:** Min/max IP ordering ensures bidirectional events map to same flow
+2. **State Transitions:** NEW → ESTABLISHED → CLOSING → CLOSED
+3. **TTL-Based Expiry:** Configurable per deployment (30min gateway, 60min LB, 10min VM)
+4. **LRU Eviction:** Removes least-recently-used flows when limits exceeded
+5. **Metrics:** Records flow creation, closure (by reason), byte/packet counts
+
+#### Pluggable Enrichment Architecture
+
+1. **Backend Selection:** Config-driven choice (bare-metal, kubernetes, disabled)
+2. **Bare-Metal Enrichment:** Hostname (reverse DNS), process info (/proc), OS context, SELinux
+3. **Kubernetes Enrichment:** Pod metadata, service account, RBAC level, network policies
+4. **Flow Context Injection:** FlowID, duration, bytes in/out, packets in/out, state transitions
+5. **Caching:** Backend-specific TTLs for performance (hostname, process, pod metadata)
+
+#### Dual-Mode Rule Engine
+
+1. **Mode Selection:** network-behavior, compliance, or dual
+2. **Rule Loading:** Mode-aware loading combines appropriate rule sets
+3. **Network-Behavior Mode:** DDoS, port scan, data exfil, tunneling detection
+4. **Compliance Mode:** 48 CIS Kubernetes v1.8 controls
+5. **Dual Mode:** Both rule sets evaluated simultaneously (performance trade-off)
+
 #### Event Enrichment Pipeline
 
-1. **Container ID Extraction:** Extract from cgroup hierarchy
-2. **Pod Lookup:** Query K8s API using container ID
-3. **Metadata Injection:** Extract security context, RBAC, network policies
-4. **Caching:** 5-minute TTL cache for performance
-5. **Default Population:** Use safe defaults for missing fields
+1. **Network Event Capture:** eBPF captures network events (sockets, packets)
+2. **Flow Tracking:** AddOrUpdateFlow() correlates bidirectional events
+3. **Backend Enrichment:** Selected enricher adds context (hostname, pod, process)
+4. **Rule Matching:** Mode-aware engine matches against appropriate rules
+5. **Violation/Anomaly Generation:** Create events for rule violations or anomalies
+6. **Webhook/API Delivery:** Push violations and flow summaries to Owl SaaS
 
-#### Rule Matching Logic
-
-1. **Event Type Filter:** Check if event type matches rule
-2. **Condition Evaluation:** Evaluate all conditions (AND logic)
-3. **Field Extraction:** Extract field values from enriched event
-4. **Operator Application:** Apply comparison operators
-5. **Violation Generation:** Create violation if all conditions match
-
-#### RBAC Privilege Calculation
+#### RBAC Privilege Calculation (K8s Enrichment)
 
 - **Level 0:** Restricted (0 permissions)
 - **Level 1:** Standard (1-10 permissions)
 - **Level 2:** Elevated (11-100 permissions)
 - **Level 3:** Admin (100+ permissions)
 
-#### Label Selector Matching
+#### Label Selector Matching (K8s Enrichment)
 
 - **MatchLabels:** Direct key=value matches
 - **MatchExpressions:** Operator-based matching (In, NotIn, Exists, DoesNotExist)
@@ -478,62 +670,101 @@ GOOS=linux GOARCH=amd64 go build -o elf-owl-linux cmd/elf-owl/main.go
 
 ## Common Development Tasks
 
-### Task 1: Add a New CIS Control Rule
+### Task 1: Add a New Network Behavior Detection Rule
 
 **Plan Structure:**
-1. Add rule to `pkg/rules/cis_mappings.go` array
-2. Define conditions based on eBPF event fields
-3. Add unit test to `pkg/rules/engine_test.go`
+1. Add rule to `pkg/rules/network_behavior.go` array
+2. Define conditions based on FlowRecord fields (bytes, packets, duration, state transitions)
+3. Add unit test to `pkg/rules/engine_test.go` testing both network-behavior and dual modes
+4. Add Prometheus metrics recording if needed
+5. Document detection logic in code comments
+
+**Anchor Comment Example:**
+```go
+// ANCHOR: [Rule ID]: [Rule Title] - Feature: Network behavior detection - [DATE]
+// Detects [what it detects]. Requires [flow field] condition match and [threshold].
+// Triggers for [specific scenario] which indicates [security risk].
+```
+
+### Task 2: Add a New Compliance Control Rule
+
+**Plan Structure:**
+1. Add rule to `pkg/rules/cis_compliance.go` array
+2. Define conditions based on eBPF event fields and K8s enrichment
+3. Add unit test to `pkg/rules/engine_test.go` testing compliance and dual modes
 4. Add remediation guidance to `docs/remediation.md`
+5. Update K8s enrichment backend if new API calls needed
 
 **Anchor Comment Example:**
 ```go
-// ANCHOR: [Control ID]: [Control Title] - Feature: CIS Kubernetes v1.8 - [DATE]
-// Detects [what it detects]. Requires [event type] event type and [field] condition match.
+// ANCHOR: CIS [Control ID]: [Control Title] - Feature: CIS Kubernetes v1.8 - [DATE]
+// Detects [violation description]. Requires [enrichment type] and [condition] match.
 ```
 
-### Task 2: Fix a Rule Matching Bug
+### Task 3: Implement a New Enrichment Backend
 
 **Plan Structure:**
-1. Read the affected rule and related tests
-2. Identify the root cause (event type, field extraction, condition logic)
-3. Trace through rule engine code
-4. Propose fix with before/after examples
-5. Create test case that reproduces bug
+1. Create `pkg/enrichment/backends/[backend]_enricher.go` implementing Enricher interface
+2. Create `pkg/enrichment/backends/[backend]_config.go` with configuration struct
+3. Implement all Enricher interface methods (EnrichNetworkEvent, EnrichProcessEvent, etc.)
+4. Add caching where appropriate for performance
+5. Add unit tests for new backend
+6. Update `pkg/agent/agent.go` NewAgent() to select new backend
+7. Create config profile in `config/profiles/elf-owl.[deployment].yaml`
 
 **Anchor Comment Example:**
 ```go
-// ANCHOR: [Rule ID] condition matching - Bug #N: [Issue description] - [DATE]
-// Previous code failed to [what was wrong]. Changed to [solution].
+// ANCHOR: [Backend] enrichment backend - Feature: [Backend] integration - [DATE]
+// Provides context for [backend-specific details] via [integration method].
+// Supports [features]. Caches [data type] for performance.
 ```
 
-### Task 3: Enhance Event Enrichment
+### Task 4: Add Flow Tracking Features
 
 **Plan Structure:**
-1. Add new fields to `EnrichedEvent` struct
-2. Add extraction logic to enricher
-3. Update K8s client if new API calls needed
-4. Update rule conditions to use new fields
-5. Test enrichment pipeline
+1. Identify new flow state or metric needed
+2. Modify `pkg/network/flow_tracker.go` FlowRecord or FlowTracker methods
+3. Add supporting Prometheus metrics in `pkg/metrics/prometheus.go`
+4. Update `pkg/enrichment/types.go` NetworkContext if new flow fields needed
+5. Add unit tests covering state transitions and eviction scenarios
+6. Update flow TTL configuration if needed in config profiles
 
 **Anchor Comment Example:**
 ```go
-// ANCHOR: Enrichment field: [field name] - Feature: [Enhancement description] - [DATE]
-// Extracts [description]. Used by [CIS controls].
+// ANCHOR: Flow tracking: [feature name] - Feature: [Enhancement description] - [DATE]
+// Tracks [what is tracked] for [purpose]. Exposed via [metrics/fields].
+// Eviction/TTL behavior: [describe].
 ```
 
-### Task 4: Update Rule Loader
+### Task 5: Fix a Dual-Mode Rule Matching Bug
 
 **Plan Structure:**
-1. Modify `LoadRulesFromFile()` or `LoadRulesFromConfigMap()`
-2. Update error handling and validation
-3. Add unit tests for new loading scenarios
-4. Verify fallback chain still works
+1. Identify bug in network-behavior, compliance, or both modes
+2. Read affected rule(s) in `cis_compliance.go` or `network_behavior.go`
+3. Trace through `pkg/rules/engine.go` mode-aware matching logic
+4. Create test case that reproduces bug in affected mode(s)
+5. Implement fix with anchor comment explaining root cause
+6. Verify fix doesn't break other modes (use all 3 modes in testing)
+
+**Anchor Comment Example:**
+```go
+// ANCHOR: [Rule ID] [mode] mode matching - Bug #N: [Issue description] - [DATE]
+// [Mode]-only bug: [what went wrong]. Changed to [solution]. Verified with dual-mode test.
+```
+
+### Task 6: Update Rule Loader for New Mode
+
+**Plan Structure:**
+1. Modify `LoadRulesFromFile()` or `LoadRulesFromConfigMap()` if needed for new source
+2. Update mode-aware loading functions (LoadNetworkBehaviorRules, LoadComplianceRules, LoadDualModeRules)
+3. Add error handling and validation for new rule source
+4. Add unit tests for mode-specific loading scenarios
+5. Verify fallback chain (File → ConfigMap → hardcoded) still works for all modes
 
 **Anchor Comment Example:**
 ```go
 // ANCHOR: Rule loading from [source] - Feature: [Enhancement] - [DATE]
-// Implements [functionality]. Supports [features].
+// Implements [functionality] for [modes]. Supports [sources] with fallback [behavior].
 ```
 
 ---

@@ -25,8 +25,41 @@ import (
 	"github.com/udyansh/elf-owl/pkg/kubernetes"
 )
 
-// Enricher adds K8s context to raw cilium/ebpf events
-type Enricher struct {
+// ANCHOR: Pluggable network enrichment interface - Feature: environment-agnostic enrichment - Jul 18, 2026
+// Allows different enrichment backends (K8s, bare-metal, cloud) without coupling to one.
+// Enricher implementation delegates to active backend; only one backend active per agent instance.
+// This enables:
+// - K8s deployments: full pod, service account, RBAC, network policy context
+// - Bare-metal/VM/Gateway: hostname, process, OS, SELinux context
+// - Cloud: AWS tags, Azure metadata (future Phase 2)
+type Enricher interface {
+	EnrichProcessEvent(ctx context.Context, rawEvent interface{}) (*EnrichedEvent, error)
+	EnrichNetworkEvent(ctx context.Context, rawEvent interface{}) (*EnrichedEvent, error)
+	EnrichDNSEvent(ctx context.Context, rawEvent interface{}) (*EnrichedEvent, error)
+	EnrichFileEvent(ctx context.Context, rawEvent interface{}) (*EnrichedEvent, error)
+	EnrichCapabilityEvent(ctx context.Context, rawEvent interface{}) (*EnrichedEvent, error)
+	EnrichTLSEvent(ctx context.Context, rawEvent interface{}) (*EnrichedEvent, error)
+	Capabilities() EnrichmentCapabilities
+}
+
+// EnrichmentCapabilities describes what an enrichment backend can do
+type EnrichmentCapabilities struct {
+	SupportsNetworkEnrichment     bool   // Can enrich network events
+	SupportsDNSEnrichment         bool   // Can enrich DNS events
+	SupportsProcessEnrichment     bool   // Can enrich process events
+	SupportsFileEnrichment        bool   // Can enrich file events
+	SupportsCapabilityEnrichment  bool   // Can enrich capability events
+	SupportsTLSEnrichment         bool   // Can enrich TLS events
+	BackendName                   string // "kubernetes", "bare-metal", "aws", etc.
+	RequiresK8sAPI                bool   // Backend needs K8s API access
+	RequiresHostFilesystem        bool   // Backend needs /proc, /sys access
+}
+
+// K8sEnricher adds K8s context to raw cilium/ebpf events
+// ANCHOR: K8s enricher as backend implementation - Feature: pluggable enrichment - Jul 18, 2026
+// Renamed from Enricher to K8sEnricher to clarify this is one implementation of the interface.
+// Provides full Kubernetes context: pod metadata, service account, RBAC, network policies.
+type K8sEnricher struct {
 	K8sClient *kubernetes.Client
 	ClusterID string
 	NodeName  string
@@ -78,19 +111,21 @@ func withEnrichmentTimeout(ctx context.Context, timeout time.Duration) (context.
 	return context.WithTimeout(ctx, timeout)
 }
 
-// NewEnricher creates a new event enricher
-// ANCHOR: Enricher initialization without circular dependency - Dec 26, 2025
+// NewK8sEnricher creates a new Kubernetes enricher
+// ANCHOR: K8s enricher initialization - Dec 26, 2025
 // Pass only needed fields (ClusterID, NodeName) instead of full Config to avoid import cycle
 // ANCHOR: watchPaths/ignorePaths param - Feature: file path watch/ignore - May 1, 2026
 // ANCHOR: allowProtocols/ignoreProtocols param - Feature: network protocol filter - May 1, 2026
 // Nil slices disable the respective filter (current default behaviour is preserved).
-func NewEnricher(k8sClient *kubernetes.Client, clusterID, nodeName string,
+// ANCHOR: K8s enricher factory - Feature: pluggable enrichment - Jul 18, 2026
+// Returns Enricher interface for compatibility with pluggable backend architecture.
+func NewK8sEnricher(k8sClient *kubernetes.Client, clusterID, nodeName string,
 	watchPaths, ignorePaths []string,
 	allowProtocols, ignoreProtocols []string,
-) (*Enricher, error) {
+) (Enricher, error) {
 	logger, _ := zap.NewProduction()
 
-	enricher := &Enricher{
+	enricher := &K8sEnricher{
 		K8sClient:              k8sClient,
 		ClusterID:              clusterID,
 		NodeName:               nodeName,
@@ -110,6 +145,23 @@ func NewEnricher(k8sClient *kubernetes.Client, clusterID, nodeName string,
 	}
 
 	return enricher, nil
+}
+
+// Capabilities returns the enrichment capabilities of the K8s enricher
+// ANCHOR: K8s enricher capabilities - Feature: pluggable enrichment interface - Jul 18, 2026
+// K8s enricher supports all event types and requires K8s API access.
+func (e *K8sEnricher) Capabilities() EnrichmentCapabilities {
+	return EnrichmentCapabilities{
+		SupportsNetworkEnrichment:    true,
+		SupportsDNSEnrichment:        true,
+		SupportsProcessEnrichment:    true,
+		SupportsFileEnrichment:       true,
+		SupportsCapabilityEnrichment: true,
+		SupportsTLSEnrichment:        true,
+		BackendName:                  "kubernetes",
+		RequiresK8sAPI:               true,
+		RequiresHostFilesystem:       false,
+	}
 }
 
 // ANCHOR: Reflection helpers for eBPF events - Phase 3 debugging support - Jan 2026
@@ -309,7 +361,7 @@ func protocolName(proto uint64) string {
 //   - ignoreProtocols non-empty and protocol matches any of them.
 //
 // Comparison is case-insensitive so "TCP" and "tcp" are equivalent.
-func (e *Enricher) protocolAllowed(protocol string) bool {
+func (e *K8sEnricher) protocolAllowed(protocol string) bool {
 	p := strings.ToLower(protocol)
 	if len(e.allowProtocols) > 0 {
 		matched := false
@@ -616,7 +668,7 @@ func isSensitivePath(path string) bool {
 //   - ignorePaths non-empty and path matches any of them.
 //
 // Both filters can be active simultaneously; a path must pass both to be kept.
-func (e *Enricher) filePathAllowed(path string) bool {
+func (e *K8sEnricher) filePathAllowed(path string) bool {
 	if len(e.watchPaths) > 0 {
 		matched := false
 		for _, p := range e.watchPaths {
@@ -699,7 +751,7 @@ func scanCgroupContainerMappings() map[string]uint64 {
 	return mappings
 }
 
-func (e *Enricher) resolvePodMetadataFromCgroupMapping(ctx context.Context, cgroupID uint64) (*PodMetadata, error) {
+func (e *K8sEnricher) resolvePodMetadataFromCgroupMapping(ctx context.Context, cgroupID uint64) (*PodMetadata, error) {
 	if e.K8sClient == nil || cgroupID == 0 {
 		return nil, nil
 	}
@@ -722,7 +774,7 @@ func (e *Enricher) resolvePodMetadataFromCgroupMapping(ctx context.Context, cgro
 	return metadata, nil
 }
 
-func (e *Enricher) refreshCgroupPodMappings(ctx context.Context, force bool) {
+func (e *K8sEnricher) refreshCgroupPodMappings(ctx context.Context, force bool) {
 	if e.K8sClient == nil {
 		return
 	}
@@ -802,7 +854,7 @@ func isHexString(value string) bool {
 // ANCHOR: Pod metadata lookup via K8s API - Phase 2.2, Dec 26, 2025
 // First checks local enricher cache, then queries K8s API for pod metadata via container ID
 // cgroupID uint64 is used as fallback when /proc lookup fails (short-lived process race).
-func (e *Enricher) getPodMetadata(ctx context.Context, containerID string, cgroupID uint64) (*PodMetadata, error) {
+func (e *K8sEnricher) getPodMetadata(ctx context.Context, containerID string, cgroupID uint64) (*PodMetadata, error) {
 	if e.K8sClient == nil {
 		return nil, nil
 	}
@@ -923,7 +975,7 @@ func (e *Enricher) getPodMetadata(ctx context.Context, containerID string, cgrou
 }
 
 // parseImageRegistry extracts registry from full image path (e.g. "docker.io/library/nginx:latest" -> "docker.io")
-func (e *Enricher) parseImageRegistry(image string) string {
+func (e *K8sEnricher) parseImageRegistry(image string) string {
 	if image == "" {
 		return ""
 	}
@@ -939,7 +991,7 @@ func (e *Enricher) parseImageRegistry(image string) string {
 }
 
 // parseImageTag extracts tag from full image path (e.g. "nginx:latest" -> "latest")
-func (e *Enricher) parseImageTag(image string) string {
+func (e *K8sEnricher) parseImageTag(image string) string {
 	if image == "" {
 		return ""
 	}
@@ -974,7 +1026,7 @@ func applyPodComplianceFields(containerCtx *ContainerContext, podMeta *PodMetada
 // Migrated from goBPF to cilium/ebpf - Dec 27, 2025
 // Generic implementation that works with any event structure
 // Populates container security context, pod metadata, and RBAC fields
-func (e *Enricher) EnrichProcessEvent(
+func (e *K8sEnricher) EnrichProcessEvent(
 	ctx context.Context,
 	rawEvent interface{},
 ) (*EnrichedEvent, error) {
@@ -1166,7 +1218,7 @@ func (e *Enricher) EnrichProcessEvent(
 // ANCHOR: Network event enrichment with policy context - Phase 2, Dec 26, 2025
 // Migrated from goBPF to cilium/ebpf with reflection-based field extraction - Dec 27, 2025
 // Populates network policy and namespace isolation fields; uses interface{} to avoid circular imports
-func (e *Enricher) EnrichNetworkEvent(
+func (e *K8sEnricher) EnrichNetworkEvent(
 	ctx context.Context,
 	rawEvent interface{},
 ) (*EnrichedEvent, error) {
@@ -1295,7 +1347,7 @@ func (e *Enricher) EnrichNetworkEvent(
 // ANCHOR: DNS event enrichment with domain context - Phase 3, Dec 27, 2025
 // Now available with cilium/ebpf; uses reflection-based field extraction to avoid circular imports
 // Populates DNS query information and domain policy fields
-func (e *Enricher) EnrichDNSEvent(
+func (e *K8sEnricher) EnrichDNSEvent(
 	ctx context.Context,
 	rawEvent interface{},
 ) (*EnrichedEvent, error) {
@@ -1385,7 +1437,7 @@ func (e *Enricher) EnrichDNSEvent(
 }
 
 // EnrichTLSEvent enriches a TLS ClientHello event and computes JA3 metadata.
-func (e *Enricher) EnrichTLSEvent(
+func (e *K8sEnricher) EnrichTLSEvent(
 	ctx context.Context,
 	rawEvent interface{},
 ) (*EnrichedEvent, error) {
@@ -1433,7 +1485,7 @@ func (e *Enricher) EnrichTLSEvent(
 // ANCHOR: File event enrichment with read-only context - Phase 2, Dec 26, 2025
 // Migrated from goBPF to cilium/ebpf with reflection-based field extraction - Dec 27, 2025
 // Populates read-only filesystem and resource limit fields; uses interface{} to avoid circular imports
-func (e *Enricher) EnrichFileEvent(
+func (e *K8sEnricher) EnrichFileEvent(
 	ctx context.Context,
 	rawEvent interface{},
 ) (*EnrichedEvent, error) {
@@ -1560,7 +1612,7 @@ func (e *Enricher) EnrichFileEvent(
 // ANCHOR: Capability event enrichment with privilege escalation context - Phase 2, Dec 26, 2025
 // Migrated from goBPF to cilium/ebpf with reflection-based field extraction - Dec 27, 2025
 // Populates privilege escalation and capability restriction fields; uses interface{} to avoid circular imports
-func (e *Enricher) EnrichCapabilityEvent(
+func (e *K8sEnricher) EnrichCapabilityEvent(
 	ctx context.Context,
 	rawEvent interface{},
 ) (*EnrichedEvent, error) {

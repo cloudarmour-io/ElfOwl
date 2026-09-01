@@ -9,6 +9,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"flag"
 	"fmt"
 	"net/http"
 	"os"
@@ -53,6 +54,19 @@ func main() {
 		zap.String("clusterID", config.Agent.ClusterID),
 		zap.String("nodeName", config.Agent.NodeName),
 	)
+
+	// ANCHOR: Command-line flag support for config file - Feature: flexible config loading - Jul 18, 2026
+	// Allow users to specify custom config file via --config flag
+	configPath := flag.String("config", "", "Path to configuration YAML file")
+	flag.Parse()
+
+	if *configPath != "" {
+		config, err = agent.LoadConfigFromFile(*configPath)
+		if err != nil {
+			zapLogger.Fatal("failed to load configuration from file", zap.Error(err), zap.String("path", *configPath))
+		}
+		zapLogger.Info("configuration loaded from file", zap.String("path", *configPath))
+	}
 
 	// Create agent with all components
 	agentInstance, err := agent.NewAgent(config)

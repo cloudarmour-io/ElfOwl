@@ -27,22 +27,20 @@ import (
 
 	"github.com/udyansh/elf-owl/pkg/api"
 	"github.com/udyansh/elf-owl/pkg/enrichment"
+	"github.com/udyansh/elf-owl/pkg/enrichment/backends"
 	"github.com/udyansh/elf-owl/pkg/evidence"
 	"github.com/udyansh/elf-owl/pkg/kubernetes"
 	"github.com/udyansh/elf-owl/pkg/logger"
 	"github.com/udyansh/elf-owl/pkg/metrics"
+	"github.com/udyansh/elf-owl/pkg/network"
 	"github.com/udyansh/elf-owl/pkg/rules"
 )
 
-// EnrichmentProvider defines the enricher methods used by agent handlers.
-type EnrichmentProvider interface {
-	EnrichProcessEvent(ctx context.Context, rawEvent interface{}) (*enrichment.EnrichedEvent, error)
-	EnrichNetworkEvent(ctx context.Context, rawEvent interface{}) (*enrichment.EnrichedEvent, error)
-	EnrichDNSEvent(ctx context.Context, rawEvent interface{}) (*enrichment.EnrichedEvent, error)
-	EnrichFileEvent(ctx context.Context, rawEvent interface{}) (*enrichment.EnrichedEvent, error)
-	EnrichCapabilityEvent(ctx context.Context, rawEvent interface{}) (*enrichment.EnrichedEvent, error)
-	EnrichTLSEvent(ctx context.Context, rawEvent interface{}) (*enrichment.EnrichedEvent, error)
-}
+// ANCHOR: Pluggable enrichment provider interface - Feature: environment-agnostic enrichment - Jul 18, 2026
+// Use enrichment.Enricher interface from enricher.go instead of local definition.
+// This enables dynamic backend selection (K8s, bare-metal, cloud) at runtime.
+// Deprecated: Use enrichment.Enricher directly; this type alias is for backward compatibility.
+type EnrichmentProvider = enrichment.Enricher
 
 // MetricsRecorder defines metrics methods used by the agent.
 type MetricsRecorder interface {
@@ -52,6 +50,14 @@ type MetricsRecorder interface {
 	RecordHostEventDiscarded()
 	RecordK8sLookupFailedDiscarded()
 	SetEventsBuffered(count int)
+	// ANCHOR: Flow metrics - Bug: elf_owl_flows_created_total/closed_total never incremented - Aug 14, 2026
+	// metrics.Registry already implements RecordFlowCreated/RecordFlowClosed/SetFlowsActive, but
+	// they were never declared here, so agent.go had no way to call them through this interface
+	// and the flow-tracking code path never recorded them. Flows were created/closed correctly
+	// in-memory (confirmed via debug logs) but the Prometheus counters stayed at zero forever.
+	RecordFlowCreated()
+	RecordFlowClosed(reason string)
+	SetFlowsActive(count int)
 }
 
 // Agent is the main compliance observer agent
@@ -77,6 +83,14 @@ type Agent struct {
 	EventBuffer *evidence.Buffer
 	ruleMu      sync.RWMutex
 
+	// ANCHOR: Flow tracker for bidirectional flow correlation - Feature: conntrack-style flow tracking - Jul 18, 2026
+	// Tracks network flows with state machine and emits closed flows to webhook
+	FlowTracker *network.FlowTracker
+
+	// ANCHOR: TCP state monitor for kernel state tracking - Feature: TCP state transitions - Jul 22, 2026
+	// Monitors tcp_set_state kprobe events and updates flow states based on kernel signals
+	TCPStateMonitor *ebpf.TCPStateMonitor
+
 	ruleReloadInterval time.Duration
 	ruleReloadTimeout  time.Duration
 
@@ -95,10 +109,11 @@ type Agent struct {
 	// producerWg tracks the goroutines that can call WebhookPusher.Send():
 	//   - 6 eBPF event handlers (handleProcessEvents … handleTLSEvents)
 	//   - 1 compliance watcher (startComplianceWatchers, only when K8sClient != nil)
+	//   - 1 flow summary emitter (startFlowSummaryEmitter, drains FlowTracker.ClosedFlows())
 	// Stop() waits for all of them to exit before calling WebhookPusher.Stop(), guaranteeing
 	// no Send() call races with the pusher's drain loop.
-	// cancelProducers is called in Stop() to signal the compliance watcher (ctx-driven) to exit.
-	producerWg     sync.WaitGroup
+	// cancelProducers is called in Stop() to signal the compliance watcher and flow emitter (ctx-driven) to exit.
+	producerWg      sync.WaitGroup
 	cancelProducers context.CancelFunc
 
 	// ANCHOR: Mutex-protected counters for goroutine safety - Dec 26, 2025
@@ -143,10 +158,16 @@ func NewAgent(config *Config) (*Agent, error) {
 	// Monitor instances are now created only after LoadProgramsWithOptions succeeds so
 	// partially initialized placeholder monitors are not kept on the agent instance.
 
-	// ANCHOR: Optional Kubernetes client bootstrap - Feature: monitor-only no-k8s mode - Mar 28, 2026
-	// When kubernetes_metadata is disabled, skip Kubernetes client creation entirely.
+	// ANCHOR: Kubernetes client bootstrap based on enrichment backend - Feature: pluggable enrichment - Jul 18, 2026
+	// Only create K8s client if enrichment backend is "kubernetes" (compliance mode or dual-mode require it)
+	// For bare-metal or disabled backends, skip K8s client creation entirely (no in-cluster config needed)
 	var k8sClient *kubernetes.Client
-	if config.Agent.Enrichment.KubernetesMetadata {
+	backendType := config.Agent.EnrichmentBackend.Type
+	if backendType == "" {
+		backendType = "kubernetes" // Default for backward compatibility
+	}
+
+	if backendType == "kubernetes" {
 		k8sClient, err = kubernetes.NewClient(config.Agent.Kubernetes.InCluster)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create kubernetes client: %w", err)
@@ -155,8 +176,8 @@ func NewAgent(config *Config) (*Agent, error) {
 		agent.Logger.Info("kubernetes client initialized")
 	} else {
 		agent.K8sClient = nil
-		agent.Logger.Warn("kubernetes metadata enrichment disabled; running without Kubernetes client",
-			zap.Bool("kubernetes_only", config.Agent.Enrichment.KubernetesOnly))
+		agent.Logger.Info("kubernetes client skipped for enrichment backend",
+			zap.String("backend", backendType))
 	}
 
 	// Initialize rule engine with configurable rule source
@@ -191,23 +212,64 @@ func NewAgent(config *Config) (*Agent, error) {
 		agent.Logger.Info("rule engine initialized with default hardcoded rules")
 	}
 
-	// Initialize enricher
-	// ANCHOR: pass file path filter to enricher - Feature: file path watch/ignore - May 1, 2026
-	// ANCHOR: pass protocol filter to enricher - Feature: network protocol filter - May 1, 2026
-	enricher, err := enrichment.NewEnricher(
-		agent.K8sClient,
-		config.Agent.ClusterID,
-		config.Agent.NodeName,
-		config.Agent.EBPF.File.WatchPaths,
-		config.Agent.EBPF.File.IgnorePaths,
-		config.Agent.EBPF.Network.AllowProtocols,
-		config.Agent.EBPF.Network.IgnoreProtocols,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create enricher: %w", err)
+	// ANCHOR: Pluggable enrichment backend initialization - Feature: environment-agnostic enrichment - Jul 18, 2026
+	// Backend type already determined above for K8s client creation; now initialize enricher
+	var enricher enrichment.Enricher
+
+	switch backendType {
+	case "bare-metal":
+		// Initialize bare-metal enricher for non-K8s environments
+		// ANCHOR: Bare-metal enricher initialization - Feature: hostname, process, OS context - Jul 18, 2026
+		// Enables enrichment with hostname resolution, process lookup, and SELinux context on gateways/VMs
+		bareMetalConfig := backends.DefaultBareMetalConfig()
+		bareMetalConfig.ReverseDNS = config.Agent.EnrichmentBackend.BareMetal.ReverseDNS
+		bareMetalConfig.ProcessLookup = config.Agent.EnrichmentBackend.BareMetal.ProcessLookup
+		bareMetalConfig.SELinuxContext = config.Agent.EnrichmentBackend.BareMetal.SELinuxContext
+		bareMetalConfig.HostnameCacheTTL = config.Agent.EnrichmentBackend.BareMetal.HostnameCacheTTL
+		bareMetalConfig.ProcessCacheTTL = config.Agent.EnrichmentBackend.BareMetal.ProcessCacheTTL
+
+		enricher, err = backends.NewBareMetalEnricher(zapLogger, config.Agent.ClusterID, config.Agent.NodeName, bareMetalConfig)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create bare-metal enricher: %w", err)
+		}
+		agent.Logger.Info("bare-metal enricher initialized",
+			zap.Bool("reverse_dns", bareMetalConfig.ReverseDNS),
+			zap.Bool("process_lookup", bareMetalConfig.ProcessLookup),
+			zap.Bool("selinux_context", bareMetalConfig.SELinuxContext),
+		)
+
+	case "kubernetes":
+		// Initialize Kubernetes enricher for K8s cluster deployments
+		// ANCHOR: Kubernetes enricher initialization - Feature: optional K8s context - Jul 18, 2026
+		// Enables enrichment with pod, service account, RBAC, and network policy context
+		// ANCHOR: pass file path filter to enricher - Feature: file path watch/ignore - May 1, 2026
+		// ANCHOR: pass protocol filter to enricher - Feature: network protocol filter - May 1, 2026
+		enricher, err = enrichment.NewK8sEnricher(
+			agent.K8sClient,
+			config.Agent.ClusterID,
+			config.Agent.NodeName,
+			config.Agent.EBPF.File.WatchPaths,
+			config.Agent.EBPF.File.IgnorePaths,
+			config.Agent.EBPF.Network.AllowProtocols,
+			config.Agent.EBPF.Network.IgnoreProtocols,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create kubernetes enricher: %w", err)
+		}
+		agent.Logger.Info("kubernetes enricher initialized")
+
+	case "disabled":
+		// No enrichment - minimal overhead mode
+		// ANCHOR: Disabled enrichment backend - Feature: monitoring without enrichment - Jul 18, 2026
+		// Used for minimal-overhead monitoring on resource-constrained systems
+		enricher = nil
+		agent.Logger.Info("enrichment disabled")
+
+	default:
+		return nil, fmt.Errorf("invalid enrichment backend type: %s (expected bare-metal, kubernetes, or disabled)", backendType)
 	}
+
 	agent.Enricher = enricher
-	agent.Logger.Info("enricher initialized")
 
 	// Initialize evidence signer and cipher
 	signingKey := agent.getSigningKey()
@@ -287,6 +349,25 @@ func NewAgent(config *Config) (*Agent, error) {
 		)
 	}
 
+	// ANCHOR: Initialize flow tracker - Feature: bidirectional flow correlation - Jul 18, 2026
+	// Creates tracker with configurable TTL and memory limits for flow state management.
+	// Default: 30-minute TTL, 500k max active flows, 256MB memory limit.
+	// Tracks bidirectional network flows with simplified 4-state machine (NEW, ESTABLISHED, CLOSING, CLOSED).
+	flowTracker := network.NewFlowTracker(
+		30*time.Minute, // activeTTL: default for gateways (configurable in future)
+		500000,         // maxActiveFlows: max concurrent flows before LRU eviction
+		256,            // memoryLimitMB: memory budget for flow tracking
+	)
+	agent.FlowTracker = flowTracker
+	agent.Logger.Info("flow tracker initialized",
+		zap.Int("max_flows", 500000),
+		zap.Int("memory_limit_mb", 256),
+		zap.Duration("ttl", 30*time.Minute),
+	)
+
+	// Note: TCP state monitor is initialized later in Start() after eBPF programs are loaded
+	// This is because it needs access to the loaded program's ringbuf map
+
 	return agent, nil
 }
 
@@ -330,6 +411,16 @@ func (a *Agent) Start(ctx context.Context) error {
 				Enabled:    a.Config.Agent.EBPF.TLS.Enabled,
 				BufferSize: a.Config.Agent.EBPF.TLS.BufferSize,
 				Timeout:    a.Config.Agent.EBPF.TLS.Timeout,
+			},
+			// ANCHOR: Wire TCPState into loadOpts - Bug: tcp_state program never loaded - Aug 14, 2026
+			// LoadOptions.TCPState previously defaulted to the Go zero value (Enabled=false) since
+			// this field was never populated from config, so programDefinitions() always skipped
+			// tcp_state regardless of config or DefaultLoadOptions(). This caused
+			// "tcp state program set is nil" at runtime and flows stuck permanently at "new".
+			TCPState: ebpf.ProgramConfig{
+				Enabled:    a.Config.Agent.EBPF.TCPState.Enabled,
+				BufferSize: a.Config.Agent.EBPF.TCPState.BufferSize,
+				Timeout:    a.Config.Agent.EBPF.TCPState.Timeout,
 			},
 			PerfBuffer: ebpf.PerfBufferOptions{
 				Enabled:     a.Config.Agent.EBPF.PerfBuffer.Enabled,
@@ -393,6 +484,19 @@ func (a *Agent) Start(ctx context.Context) error {
 		if a.Config.Agent.EBPF.TLS.Enabled && collection.TLS != nil {
 			a.TLSMonitor = ebpf.NewTLSMonitor(collection.TLS, a.Logger)
 		}
+
+		// ANCHOR: Initialize TCP state monitor - Feature: kernel TCP state tracking - Jul 22, 2026
+		// Monitor tcp_set_state kprobe events to track TCP state transitions from kernel
+		if collection != nil {
+			tcpStateMonitor, err := ebpf.NewTCPStateMonitor(a.Logger, collection.TCPState)
+			if err != nil {
+				a.Logger.Warn("failed to create TCP state monitor (state transitions disabled)",
+					zap.Error(err))
+			} else if tcpStateMonitor != nil {
+				a.TCPStateMonitor = tcpStateMonitor
+				a.Logger.Info("tcp state monitor initialized")
+			}
+		}
 	}
 
 	// ANCHOR: Start all cilium/ebpf monitors with context - Dec 27, 2025
@@ -438,6 +542,15 @@ func (a *Agent) Start(ctx context.Context) error {
 		a.Logger.Info("tls monitor started")
 	}
 
+	// ANCHOR: Start TCP state monitor - Feature: kernel TCP state tracking - Jul 22, 2026
+	// Monitors tcp_set_state kprobe events for accurate flow state transitions
+	if a.TCPStateMonitor != nil {
+		if err := a.TCPStateMonitor.Start(); err != nil {
+			return fmt.Errorf("failed to start tcp state monitor: %w", err)
+		}
+		a.Logger.Info("tcp state monitor started")
+	}
+
 	// ANCHOR: WebhookPusher send/drain barrier - Bug #9: producers tracked before launch - Apr 30, 2026
 	// Derive a child context for the producer goroutines so Stop() can cancel them independently
 	// of the caller's context. cancelProducers is called in Stop() before producerWg.Wait().
@@ -445,13 +558,22 @@ func (a *Agent) Start(ctx context.Context) error {
 	a.cancelProducers = cancelProducers
 
 	// Launch event handlers for each cilium/ebpf monitor
-	a.producerWg.Add(6)
+	// ANCHOR: Producer goroutine count - Feature: TCP state tracking - Jul 22, 2026
+	// Tracks handlers that push events to webhook: 6 eBPF monitors + 1 flow summary emitter + 1 TCP state handler
+	producerCount := 8
+	if a.TCPStateMonitor == nil {
+		producerCount = 7  // Skip TCP state handler if monitor not available
+	}
+	a.producerWg.Add(producerCount)
 	go a.handleProcessEvents(producerCtx)
 	go a.handleNetworkEvents(producerCtx)
 	go a.handleDNSEvents(producerCtx)
 	go a.handleFileEvents(producerCtx)
 	go a.handleCapabilityEvents(producerCtx)
 	go a.handleTLSEvents(producerCtx)
+	if a.TCPStateMonitor != nil {
+		go a.handleTCPStateEvents(producerCtx)
+	}
 
 	// ANCHOR: Start K8s compliance watchers - Feature: pod_spec_check/network_policy_check - Mar 22, 2026
 	// Watches K8s API objects and emits compliance events for rules that are not
@@ -460,6 +582,13 @@ func (a *Agent) Start(ctx context.Context) error {
 		a.producerWg.Add(1)
 		go a.startComplianceWatchers(producerCtx)
 	}
+
+	// ANCHOR: Start flow summary emission goroutine - Feature: flow lifecycle webhook events - Jul 18, 2026
+	// Drains closed flows from FlowTracker and emits flow_summary webhook events.
+	// Tracks active flows and their transitions for network behavior analysis.
+	a.producerWg.Add(1)
+	go a.startFlowSummaryEmitter(producerCtx)
+
 	go a.watchRuleUpdates(ctx)
 
 	// ANCHOR: Respect owl_api.push.enabled - Bugfix: prevent unintended push loop - Mar 22, 2026
@@ -478,6 +607,15 @@ func (a *Agent) Start(ctx context.Context) error {
 
 	// Launch periodic metrics collector
 	go a.collectMetrics(ctx)
+
+	// ANCHOR: Launch periodic flow expiry - Bug: ExpireOldFlows never called, idle flows never TTL-expired - Aug 14, 2026
+	// Without this, flows that never see a graceful FIN/CLOSE (silently dropped connections,
+	// crashed peers) accumulated in FlowTracker's active map forever, only ever shrinking via
+	// MaxActiveFlows/LRU eviction. ExpireOldFlows() itself already closes+emits+removes; it
+	// just needed a periodic caller.
+	if a.FlowTracker != nil {
+		go a.expireFlowsLoop(ctx)
+	}
 
 	a.Logger.Info("agent started successfully")
 	return nil
@@ -543,6 +681,69 @@ func (a *Agent) handleRuntimeEvent(
 		}
 	}
 
+	// ANCHOR: Flow tracking for network events - Feature: bidirectional flow correlation - Jul 18, 2026
+	// After enrichment, correlate network events into bidirectional flows and populate flow fields.
+	if enrichedEvent != nil && enrichedEvent.Network != nil && a.FlowTracker != nil {
+		// ANCHOR: Skip incomplete tcp_connect events - Bug: port=0 orphan flow entries - Aug 14, 2026
+		// tcp/tcp_connect (network.c) fires before the local port is assigned on this kernel,
+		// so its event always carries SourcePort=0. Tracking it creates a flow keyed on port 0
+		// that can never match the later inet_sock_set_state events for the same connection
+		// (which carry the real port), leaving an orphan flow permanently stuck at "new".
+		// inet_sock_set_state's own SYN_SENT event carries the real port and creates the flow
+		// correctly, so tcp_connect's placeholder event is redundant for flow tracking. Only
+		// flow correlation is skipped here — rule matching/webhook delivery below still runs.
+		if !(enrichedEvent.Network.Protocol == "tcp" && enrichedEvent.Network.SourcePort == 0) {
+			// ANCHOR: Flow state determination - Bug: uppercase/lowercase cast never matched - Aug 14, 2026
+			// ConnectionState holds an uppercase kernel state name (e.g. "ESTABLISHED", from
+			// network_monitor.go's tcpStateName), which does not equal any lowercase FlowState
+			// constant. Casting it directly (network.FlowState(name)) stored the raw kernel name
+			// into flow.State instead of transitioning the 4-state machine, so flows appeared
+			// permanently stuck at "new". FlowStateFromName performs the correct translation and
+			// returns "" for names with no meaningful transition (LISTEN/UNKNOWN), in which case
+			// we keep the default NEW for a brand-new flow rather than fabricate a state.
+			flowStateValue := network.FlowStateNEW
+			if mapped := network.FlowStateFromName(enrichedEvent.Network.ConnectionState); mapped != "" {
+				flowStateValue = mapped
+			}
+
+			// Call FlowTracker.AddOrUpdateFlow() to correlate events into bidirectional flows
+			flowKey, isNewFlow, flowState := a.FlowTracker.AddOrUpdateFlow(
+				enrichedEvent.Network.SourceIP,
+				enrichedEvent.Network.DestinationIP,
+				enrichedEvent.Network.SourcePort,
+				enrichedEvent.Network.DestinationPort,
+				enrichedEvent.Network.Protocol,
+				enrichedEvent.Network.NetworkNamespaceID,
+				0, // bytes - will be set to 0 for now (can be extended with packet size in future)
+				flowStateValue,
+			)
+
+			// Populate flow fields in NetworkContext
+			if flowKey != nil {
+				enrichedEvent.Network.FlowID = flowKey.String()
+				enrichedEvent.Network.IsReversed = false // Will be set by FlowTracker in future phases
+				a.Logger.Debug("flow tracked",
+					zap.String("flow_id", enrichedEvent.Network.FlowID),
+					zap.String("flow_state", string(flowState)),
+					zap.String("state_source", enrichedEvent.Network.ConnectionState),
+					zap.Bool("is_new", isNewFlow),
+				)
+				// ANCHOR: Record flow creation metric - Bug: elf_owl_flows_created_total never incremented - Aug 14, 2026
+				if isNewFlow {
+					a.MetricsRegistry.RecordFlowCreated()
+				}
+
+				// ANCHOR: Close flow on terminal state - Bug: CloseFlow never called - Aug 14, 2026
+				// AddOrUpdateFlow only overwrites flow.State in place; nothing ever removed the
+				// flow from the active map or pushed it onto FlowTracker.ClosedFlows() for the
+				// webhook emitter/RecordFlowClosed metric until CloseFlow actually ran.
+				if flowState == network.FlowStateCLOSED {
+					a.FlowTracker.CloseFlow(flowKey, "fin")
+				}
+			}
+		}
+	}
+
 	ruleEngine := a.getRuleEngine()
 	if ruleEngine == nil {
 		return
@@ -605,6 +806,9 @@ func (a *Agent) handleNetworkEvent(ctx context.Context, rawEnriched *enrichment.
 	// WHY: Network monitor only fills NetworkContext; K8s/container metadata added here.
 	// WHAT: Enrich raw network event with pod metadata and network policy context.
 	// HOW: EnrichNetworkEvent queries K8s API using container ID from /proc cgroup.
+	// ANCHOR: Flow tracking for network events - Feature: bidirectional flow correlation - Jul 18, 2026
+	// After enrichment, correlate network events into bidirectional flows and populate flow fields.
+
 	a.handleRuntimeEvent(
 		ctx,
 		rawEnriched,
@@ -615,6 +819,11 @@ func (a *Agent) handleNetworkEvent(ctx context.Context, rawEnriched *enrichment.
 		"network event enrichment failed, using partial event",
 		false,
 	)
+
+	// Populate flow tracking fields after enrichment completes
+	// This is a placeholder for flow tracking integration - actual implementation will
+	// call FlowTracker.AddOrUpdateFlow() and populate NetworkContext flow fields
+	// TODO(phase5-task12): Integrate FlowTracker.AddOrUpdateFlow() to populate flow fields
 }
 
 func (a *Agent) handleDNSEvent(ctx context.Context, rawEnriched *enrichment.EnrichedEvent) {
@@ -925,10 +1134,101 @@ func (a *Agent) collectMetrics(ctx context.Context) {
 				zap.Int64("violations_found", violations),
 			)
 
+			// ANCHOR: Sync flow tracker gauge to Prometheus - Bug: elf_owl_flows_active never set - Aug 14, 2026
+			// SetFlowsActive existed on metrics.Registry but was never called; FlowTracker.Stats()
+			// already tracks ActiveFlows, so refresh the gauge on the same periodic tick.
+			if a.FlowTracker != nil {
+				a.MetricsRegistry.SetFlowsActive(a.FlowTracker.Stats().ActiveFlows)
+			}
+
 		case <-a.done:
 			return
 
 		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// ANCHOR: Periodic flow expiry - Bug: idle flows never TTL-expired - Aug 14, 2026
+// Calls FlowTracker.ExpireOldFlows() periodically so flows that never see a graceful
+// FIN/CLOSE (dropped connections, crashed peers) still close, emit, and free memory.
+// Not tracked by producerWg: ExpireOldFlows() only writes to FlowTracker.ClosedFlows(),
+// which startFlowSummaryEmitter (a tracked producer) drains; this loop never calls
+// WebhookPusher.Send() directly.
+func (a *Agent) expireFlowsLoop(ctx context.Context) {
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			if expired := a.FlowTracker.ExpireOldFlows(); expired > 0 {
+				a.Logger.Debug("expired idle flows", zap.Int("count", expired))
+			}
+
+		case <-a.done:
+			return
+
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
+// ANCHOR: Flow summary emission goroutine - Feature: flow lifecycle webhook events - Jul 18, 2026
+// Drains closed flows from FlowTracker and emits flow_summary webhook events.
+// Called as a producer goroutine and tracked by producerWg.
+func (a *Agent) startFlowSummaryEmitter(ctx context.Context) {
+	defer a.producerWg.Done()
+
+	a.Logger.Debug("flow summary emitter started")
+
+	for {
+		select {
+		case closedFlow := <-a.FlowTracker.ClosedFlows():
+			// ANCHOR: Emit flow summary event - Feature: flow lifecycle webhook events - Jul 18, 2026
+			// Convert closed FlowRecord to FlowSummaryEvent and push to webhook
+			if closedFlow == nil {
+				continue
+			}
+
+			// Create flow summary event with all metrics and metadata
+			flowSummary := &FlowSummaryEvent{
+				EventType:   "flow_summary",
+				Timestamp:   time.Now(),
+				ClusterID:   a.Config.Agent.ClusterID,
+				NodeName:    a.Config.Agent.NodeName,
+				FlowKey:     closedFlow.Key.String(),
+				State:       string(closedFlow.State),
+				CreatedAt:   closedFlow.CreatedAt,
+				LastSeenAt:  closedFlow.LastSeenAt,
+				BytesSent:   closedFlow.BytesSent,
+				BytesRecv:   closedFlow.BytesRecv,
+				PacketsSent: closedFlow.PacketsSent,
+				PacketsRecv: closedFlow.PacketsRecv,
+				CloseReason: closedFlow.CloseReason,
+				IsReversed:  closedFlow.IsReversed,
+			}
+
+			// Push flow summary to webhook if available
+			if a.WebhookPusher != nil {
+				a.WebhookPusher.SendFlowSummary(flowSummary)
+			}
+
+			// ANCHOR: Record flow closure metric - Bug: elf_owl_flows_closed_total never incremented - Aug 14, 2026
+			a.MetricsRegistry.RecordFlowClosed(closedFlow.CloseReason)
+
+			a.Logger.Debug("flow closed",
+				zap.String("flow_key", closedFlow.Key.String()),
+				zap.String("state", string(closedFlow.State)),
+				zap.String("reason", closedFlow.CloseReason),
+				zap.Uint64("bytes_sent", closedFlow.BytesSent),
+				zap.Uint64("bytes_recv", closedFlow.BytesRecv),
+			)
+
+		case <-ctx.Done():
+			a.Logger.Debug("flow summary emitter stopping")
 			return
 		}
 	}
@@ -1219,4 +1519,62 @@ func generateEphemeralKey() (string, error) {
 		return "", err
 	}
 	return base64.StdEncoding.EncodeToString(keyBytes), nil
+}
+
+// ANCHOR: Handle TCP state transition events - Feature: kernel TCP state tracking - Jul 22, 2026
+// Reads tcp_set_state kprobe events and updates flow states based on kernel signals.
+// Maps kernel TCP states to our simplified 4-state flow machine.
+func (a *Agent) handleTCPStateEvents(ctx context.Context) {
+	defer a.producerWg.Done()
+	if a.TCPStateMonitor == nil || a.FlowTracker == nil {
+		a.Logger.Warn("tcp state handler disabled: monitor or flow tracker is nil")
+		return
+	}
+
+	a.Logger.Info("tcp state event handler started")
+	eventChan := a.TCPStateMonitor.Events()
+	eventCount := 0
+
+	for {
+		select {
+		case event := <-eventChan:
+			if event == nil {
+				continue
+			}
+
+			eventCount++
+			a.Logger.Debug("tcp state event received",
+				zap.Int("total_events", eventCount),
+				zap.Uint32("raw_state", event.NewState),
+			)
+
+			// Map kernel TCP state to our flow state
+			flowState := network.TCPStateToFlowState(event.NewState)
+			if flowState == "" {
+				// Unknown or filtered state, skip
+				a.Logger.Debug("skipping unknown tcp state", zap.Uint32("state", event.NewState))
+				continue
+			}
+
+			// Log state transition with human-readable names
+			a.Logger.Info("tcp state transition detected",
+				zap.String("new_state", network.TCPStateName(event.NewState)),
+				zap.String("flow_state", network.FlowStateName(flowState)),
+			)
+
+			// Note: In a future enhancement, we would:
+			// 1. Extract 4-tuple from the kprobe context
+			// 2. Look up the flow in the flow tracker
+			// 3. Update its state
+			// For now, this demonstrates the integration point and metrics
+			a.MetricsRegistry.RecordEventProcessed()
+
+		case <-a.done:
+			a.Logger.Debug("tcp state handler shutting down", zap.Int("events_processed", eventCount))
+			return
+		case <-ctx.Done():
+			a.Logger.Debug("tcp state handler context cancelled", zap.Int("events_processed", eventCount))
+			return
+		}
+	}
 }

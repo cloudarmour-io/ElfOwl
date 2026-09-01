@@ -92,6 +92,7 @@ type LoadOptions struct {
 	Capability    ProgramConfig
 	DNS           ProgramConfig
 	TLS           ProgramConfig
+	TCPState      ProgramConfig
 	PerfBuffer    PerfBufferOptions
 	RingBuffer    RingBufferOptions
 	KernelBTFPath string
@@ -122,6 +123,10 @@ type Collection struct {
 	// TLS monitors outbound TLS ClientHello metadata
 	TLS *ProgramSet
 
+	// ANCHOR: TCP state monitor program - Feature: kernel TCP state tracking - Jul 22, 2026
+	// Monitors tcp_set_state kprobe events for accurate flow state transitions
+	TCPState *ProgramSet
+
 	// Logger for diagnostics
 	Logger *zap.Logger
 
@@ -147,6 +152,7 @@ func DefaultLoadOptions() LoadOptions {
 		Capability: ProgramConfig{Enabled: true},
 		DNS:        ProgramConfig{Enabled: true},
 		TLS:        ProgramConfig{Enabled: true},
+		TCPState:   ProgramConfig{Enabled: true},
 		PerfBuffer: PerfBufferOptions{Enabled: true, PageCount: 64, LostHandler: true},
 		RingBuffer: RingBufferOptions{Enabled: false, Size: 65536},
 	}
@@ -202,6 +208,16 @@ func programDefinitions(opts LoadOptions) []programDefinition {
 			TracepointGroup: "syscalls",
 			TracepointName:  "sys_enter_write",
 			Config:          opts.TLS,
+		},
+		{
+			Name:        TCPStateProgramName,
+			Description: "TCP state transitions",
+			MapName:     TCPStateEventsMap,
+			// ANCHOR: TCP state kprobe - Feature: kernel TCP state tracking - Jul 22, 2026
+			// Uses kprobe on tcp_set_state to capture state transitions; section name will be parsed as kprobe/tcp_set_state
+			TracepointGroup: "tcp_set_state",
+			TracepointName:  "tcp_set_state",
+			Config:          opts.TCPState,
 		},
 	}
 }
@@ -274,11 +290,21 @@ func loadProgramSet(logger *zap.Logger, def programDefinition, opts LoadOptions)
 		return nil, fmt.Errorf("event map %s not found", def.MapName)
 	}
 
-	reader, err := createReader(eventMap, def, opts, logger)
-	if err != nil {
-		closeLinks(links)
-		collection.Close()
-		return nil, fmt.Errorf("create event reader: %w", err)
+	// ANCHOR: Skip generic reader for tcp_state - Bug: hard failure when ring_buffer.enabled=false - Aug 14, 2026
+	// TCPStateMonitor opens its own ringbuf.Reader directly on programSet.Maps["tcp_state_events"]
+	// (see ebpf.NewTCPStateMonitor) and never uses ProgramSet.Reader. Routing it through the
+	// generic createReader() here needlessly required opts.RingBuffer.Enabled=true — a toggle
+	// meant for other ring-buffer-backed programs — which is false in every shipped config
+	// profile, so enabling tcp_state always failed the entire eBPF load with
+	// "create event reader: ring buffer reader disabled".
+	var reader Reader
+	if def.Name != TCPStateProgramName {
+		reader, err = createReader(eventMap, def, opts, logger)
+		if err != nil {
+			closeLinks(links)
+			collection.Close()
+			return nil, fmt.Errorf("create event reader: %w", err)
+		}
 	}
 
 	if logger != nil {
@@ -353,6 +379,10 @@ func attachPrograms(logger *zap.Logger, setName string, programs map[string]*ebp
 				Name:    tpName,
 				Program: prog,
 			})
+		case "kprobe":
+			// ANCHOR: kprobe attach - Feature: kernel TCP state tracking - Aug 14, 2026
+			// Attaches a kprobe/<func> section to the named kernel function (e.g. tcp_set_state).
+			lnk, err = link.Kprobe(tpName, prog, nil)
 		default:
 			continue
 		}
@@ -435,6 +465,18 @@ func parseTracepointSection(section string) (kind, group, name string, ok bool) 
 			return "", "", "", false
 		}
 		return "raw_tracepoint", "", name, true
+	}
+	// ANCHOR: kprobe section support - Bug: tcp_state program never attached - Aug 14, 2026
+	// attachPrograms previously only recognized tracepoint/raw_tracepoint sections, so a
+	// kprobe/tcp_set_state program silently matched zero attach kinds, making attachPrograms
+	// return len(programs)==0 and loadProgramSet fail the ENTIRE eBPF load with
+	// "no tracepoint programs found in tcp_state" whenever tcp_state was enabled.
+	if strings.HasPrefix(section, "kprobe/") {
+		name = strings.TrimPrefix(section, "kprobe/")
+		if name == "" {
+			return "", "", "", false
+		}
+		return "kprobe", "", name, true
 	}
 	return "", "", "", false
 }
@@ -607,6 +649,8 @@ func LoadProgramsWithOptions(logger *zap.Logger, opts LoadOptions) (*Collection,
 			coll.DNS = programSet
 		case TLSProgramName:
 			coll.TLS = programSet
+		case TCPStateProgramName:
+			coll.TCPState = programSet
 		}
 	}
 

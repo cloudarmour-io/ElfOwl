@@ -36,4 +36,5 @@ var ListPrograms = []string{
 	CapabilityProgramName,
 	DNSProgramName,
 	TLSProgramName,
+	TCPStateProgramName,
 }

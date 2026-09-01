@@ -63,19 +63,22 @@ type Config struct {
 
 // AgentConfig contains agent-specific settings
 // ANCHOR: Migrated to cilium/ebpf only (removed goBPF) - Dec 27, 2025
+// ANCHOR: Pluggable enrichment backend selection - Feature: environment-agnostic enrichment - Jul 18, 2026
+// EnrichmentBackend enables selection of enrichment backend (bare-metal, kubernetes, disabled)
 type AgentConfig struct {
-	ClusterID  string           `yaml:"cluster_id"`
-	NodeName   string           `yaml:"node_name"`
-	Logging    LoggingConfig    `yaml:"logging"`
-	EBPF       EBPFConfig       `yaml:"ebpf"`
-	Kubernetes KubernetesConfig `yaml:"kubernetes"`
-	Rules      RulesConfig      `yaml:"rules"`
-	Enrichment EnrichmentConfig `yaml:"enrichment"`
-	Evidence   EvidenceConfig   `yaml:"evidence"`
-	OWL        OWLConfig        `yaml:"owl_api"`
-	Metrics    MetricsConfig    `yaml:"metrics"`
-	Health     HealthConfig     `yaml:"health"`
-	Webhook    WebhookConfig    `yaml:"webhook"`
+	ClusterID           string                    `yaml:"cluster_id"`
+	NodeName            string                    `yaml:"node_name"`
+	Logging             LoggingConfig             `yaml:"logging"`
+	EBPF                EBPFConfig                `yaml:"ebpf"`
+	Kubernetes          KubernetesConfig          `yaml:"kubernetes"`
+	Rules               RulesConfig               `yaml:"rules"`
+	Enrichment          EnrichmentConfig          `yaml:"enrichment"`          // Deprecated, kept for backward compat
+	EnrichmentBackend   EnrichmentBackendConfig   `yaml:"enrichment_backend"`  // New pluggable backend config
+	Evidence            EvidenceConfig            `yaml:"evidence"`
+	OWL                 OWLConfig                 `yaml:"owl_api"`
+	Metrics             MetricsConfig             `yaml:"metrics"`
+	Health              HealthConfig              `yaml:"health"`
+	Webhook             WebhookConfig             `yaml:"webhook"`
 }
 
 // LoggingConfig defines logging behavior
@@ -97,8 +100,11 @@ type EBPFConfig struct {
 	File          EBPFFileConfig    `yaml:"file"`
 	Capability    EBPFMonitorConfig `yaml:"capability"`
 	TLS           EBPFMonitorConfig `yaml:"tls"`
-	PerfBuffer    PerfBufferConfig  `yaml:"perf_buffer"`
-	RingBuffer    RingBufferConfig  `yaml:"ring_buffer"`
+	// ANCHOR: TCPState config - Feature: kernel TCP state tracking - Aug 14, 2026
+	// Controls the tcp_set_state kprobe that reports kernel-accurate flow state transitions.
+	TCPState   EBPFMonitorConfig `yaml:"tcp_state"`
+	PerfBuffer PerfBufferConfig  `yaml:"perf_buffer"`
+	RingBuffer RingBufferConfig  `yaml:"ring_buffer"`
 }
 
 // EBPFMonitorConfig defines individual Cilium/eBPF monitor settings
@@ -156,7 +162,10 @@ type KubernetesConfig struct {
 // RulesConfig defines rule engine settings
 // ANCHOR: Rule loading configuration - Phase 3.1 Week 3
 // Supports loading rules from file, ConfigMap, or hardcoded defaults
+// ANCHOR: Mode-aware rules configuration - Feature: dual-mode network-behavior + compliance - Jul 18, 2026
+// Mode field enables selection between network-behavior detection (default), compliance checking, or dual mode
 type RulesConfig struct {
+	Mode      string `yaml:"mode"`       // "network-behavior" (default), "compliance", or "dual"
 	FilePath  string `yaml:"file_path"` // Path to YAML rules file (e.g., /etc/elf-owl/rules.yaml)
 	ConfigMap struct {
 		Name      string `yaml:"name"`
@@ -166,7 +175,44 @@ type RulesConfig struct {
 	LogViolations bool          `yaml:"log_violations"`
 }
 
-// EnrichmentConfig defines event enrichment settings
+// EnrichmentBackendConfig defines pluggable enrichment backend settings
+// ANCHOR: Pluggable enrichment backend configuration - Feature: environment-agnostic enrichment - Jul 18, 2026
+// Type selects which enrichment backend to use:
+// - "bare-metal": Hostname, process, OS context (lightweight for gateways/firewalls)
+// - "kubernetes": Pod, service account, RBAC, network policies (for K8s deployments)
+// - "disabled": No enrichment (minimal overhead)
+// Each backend has optional configuration for caching, feature flags, etc.
+type EnrichmentBackendConfig struct {
+	Type       string                        `yaml:"type"`        // "bare-metal", "kubernetes", or "disabled"
+	BareMetal  BareMetalEnrichmentConfig     `yaml:"bare_metal"`
+	Kubernetes KubernetesEnrichmentConfig    `yaml:"kubernetes"`
+}
+
+// BareMetalEnrichmentConfig defines bare-metal enrichment options
+// ANCHOR: Bare-metal enrichment backend config - Feature: hostname, process, OS context - Jul 18, 2026
+// Configuration for bare-metal, VM, and gateway deployments
+type BareMetalEnrichmentConfig struct {
+	ReverseDNS       bool          `yaml:"reverse_dns"`        // Resolve destination IP to hostname
+	ProcessLookup    bool          `yaml:"process_lookup"`     // Extract process name from /proc
+	SELinuxContext   bool          `yaml:"selinux_context"`    // Read SELinux labels
+	HostnameCacheTTL time.Duration `yaml:"hostname_cache_ttl"` // Reverse DNS cache TTL
+	ProcessCacheTTL  time.Duration `yaml:"process_cache_ttl"`  // /proc lookup cache TTL
+}
+
+// KubernetesEnrichmentConfig defines Kubernetes enrichment options
+// ANCHOR: Kubernetes enrichment backend config - Feature: optional K8s context - Jul 18, 2026
+// Configuration for Kubernetes cluster deployments
+type KubernetesEnrichmentConfig struct {
+	InCluster            bool          `yaml:"in_cluster"`              // Use in-cluster auth
+	KubeConfig           string        `yaml:"kubeconfig"`              // Path to kubeconfig file
+	MetadataCacheTTL     time.Duration `yaml:"metadata_cache_ttl"`      // Pod/service account cache TTL
+	CgroupRefreshInterval time.Duration `yaml:"cgroup_refresh_interval"` // How often to refresh pod->container mappings
+	EnrichmentTimeout    time.Duration `yaml:"enrichment_timeout"`      // Timeout for K8s API calls
+}
+
+// EnrichmentConfig (deprecated, kept for backward compatibility)
+// ANCHOR: Deprecated enrichment config - Feature: backward compatibility - Jul 18, 2026
+// Kept for backward compatibility. New deployments should use EnrichmentBackendConfig.
 type EnrichmentConfig struct {
 	KubernetesMetadata bool          `yaml:"kubernetes_metadata"`
 	MetadataCacheSize  int           `yaml:"metadata_cache_size"`
@@ -295,6 +341,35 @@ func LoadConfig() (*Config, error) {
 
 			break
 		}
+	}
+
+	// Override with environment variables
+	config.applyEnvironmentOverrides()
+
+	// Validate configuration
+	if err := config.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid configuration: %w", err)
+	}
+
+	return config, nil
+}
+
+// ANCHOR: Load configuration from explicit file path - Feature: command-line config specification - Jul 18, 2026
+// LoadConfigFromFile loads configuration from an explicit file path (e.g., --config flag)
+func LoadConfigFromFile(filePath string) (*Config, error) {
+	// ANCHOR: defaults-first config loading - Apply same pattern as LoadConfig()
+	config := DefaultConfig()
+
+	configData, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read config file %s: %w", filePath, err)
+	}
+
+	// Expand sentinel variables (same security policy as LoadConfig)
+	configData = []byte(expandSentinelVars(string(configData)))
+
+	if err := yaml.Unmarshal(configData, &config); err != nil {
+		return nil, fmt.Errorf("failed to parse config file %s: %w", filePath, err)
 	}
 
 	// Override with environment variables
@@ -463,6 +538,11 @@ func DefaultConfig() *Config {
 					Timeout:    5 * time.Second,
 				},
 				TLS: EBPFMonitorConfig{
+					Enabled:    true,
+					BufferSize: 4096,
+					Timeout:    5 * time.Second,
+				},
+				TCPState: EBPFMonitorConfig{
 					Enabled:    true,
 					BufferSize: 4096,
 					Timeout:    5 * time.Second,

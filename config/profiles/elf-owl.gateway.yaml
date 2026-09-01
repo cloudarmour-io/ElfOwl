@@ -1,0 +1,151 @@
+# elf-owl Gateway Configuration Profile
+# Optimized for firewall/network gateway deployments
+# Network-behavior-centric anomaly detection with bare-metal enrichment
+#
+# Features:
+# - DDoS flood detection
+# - Port scan detection
+# - Data exfiltration detection
+# - Persistent tunnel/long-lived connection detection
+# - Hostname and process enrichment (no K8s required)
+
+agent:
+  # Cluster identification
+  cluster_id: "gateway"
+  node_name: "${HOSTNAME}"
+
+  # Logging configuration
+  logging:
+    level: "info"  # debug, info, warn, error
+    format: "json"
+    output: "stdout"
+
+  # ANCHOR: Gateway eBPF monitoring - Feature: firewall/gateway deployment - Jul 18, 2026
+  # Optimized for high-throughput network monitoring on gateways and firewalls
+  # Focus on network events (enabled), minimal overhead on process/file/DNS (disabled)
+  ebpf:
+    enabled: true
+    kernel_btf_path: ""
+    process:
+      enabled: false  # Not needed for gateway deployments
+      buffer_size: 4096
+      timeout: 5s
+    network:
+      enabled: true  # Critical for gateway deployments
+      buffer_size: 16384  # Larger buffer for high-throughput scenarios
+      timeout: 5s
+      allow_protocols: []  # Empty = monitor all protocols
+      ignore_protocols: []  # Can be customized to drop specific protocols
+    dns:
+      enabled: false  # Optional; disable for minimal overhead
+      buffer_size: 4096
+      timeout: 5s
+    file:
+      enabled: false  # Not needed for gateway deployments
+      buffer_size: 4096
+      timeout: 5s
+    capability:
+      enabled: false  # Not needed for gateway deployments
+      buffer_size: 4096
+      timeout: 5s
+    tls:
+      enabled: false  # Optional; disable for minimal overhead
+      buffer_size: 4096
+      timeout: 5s
+    # ANCHOR: TCP state kprobe for gateway - Feature: kernel-accurate flow state transitions - Aug 14, 2026
+    # Reports real TCP state changes (SYN_SENT -> ESTABLISHED -> FIN/CLOSE) so flows don't
+    # stay stuck at "new"; critical for accurate gateway flow tracking.
+    tcp_state:
+      enabled: true
+      buffer_size: 4096
+      timeout: 5s
+    perf_buffer:
+      enabled: true
+      page_count: 512  # Larger buffer for high-throughput gateways
+      lost_handler: true
+    ring_buffer:
+      enabled: false
+      size: 65536
+
+  # ANCHOR: Kubernetes disabled for gateway - Feature: non-K8s gateway deployment - Jul 18, 2026
+  # Gateways don't need K8s integration; all metadata from bare-metal enrichment
+  kubernetes:
+    in_cluster: false
+    metadata_cache_ttl: 300s
+    watch_interval: 30s
+
+  # ANCHOR: Network-behavior-centric rules for gateway - Feature: firewall anomaly detection - Jul 18, 2026
+  # Rule mode: "network-behavior" for DDoS, port scan, data exfil, tunnel detection
+  # File-based rules can be overridden for custom detection logic
+  rules:
+    mode: "network-behavior"  # Critical: gateway-optimized anomaly detection
+    # file_path: "/etc/elf-owl/rules-gateway.yaml"  # Optional: custom rule overrides
+    eval_timeout: 5s
+    log_violations: true
+
+  # ANCHOR: Bare-metal enrichment for gateway - Feature: hostname, process, OS context - Jul 18, 2026
+  # Backend type: "bare-metal" for hostname resolution and process lookups
+  # Enriches network flows with source process and user information
+  enrichment_backend:
+    type: "bare-metal"
+    bare_metal:
+      reverse_dns: true  # Resolve destination IPs to hostnames
+      process_lookup: true  # Extract process name from network connections
+      selinux_context: false  # Optional: enable if using SELinux
+      hostname_cache_ttl: 3600s  # Cache DNS lookups for 1 hour
+      process_cache_ttl: 300s    # Cache /proc lookups for 5 minutes
+    # kubernetes section ignored when type=bare-metal
+
+  # Evidence signing and encryption
+  evidence:
+    signing:
+      enabled: true
+      algorithm: "HMAC-SHA256"
+    encryption:
+      enabled: true
+      algorithm: "AES-256-GCM"
+
+  # Owl SaaS API configuration
+  owl_api:
+    endpoint: "https://owl-saas.example.com"
+    auth:
+      method: "jwt"
+      token_path: "/var/run/secrets/owl-jwt-token"
+    push:
+      batch_size: 100
+      batch_timeout: 30s
+      enabled: true
+      dry_run: false
+    retry:
+      max_retries: 10
+      initial_backoff: 1s
+      max_backoff: 60s
+      backoff_multiplier: 2.0
+    tls:
+      enabled: false
+      verify: true
+      ca_cert_path: ""
+
+  # Prometheus metrics
+  metrics:
+    enabled: true
+    listen_address: ":9090"
+    path: "/metrics"
+
+  # Health check endpoints
+  health:
+    enabled: true
+    listen_address: ":9091"
+    path: "/health"
+
+  # ANCHOR: Webhook configuration for gateway - Feature: flow event delivery - Jul 18, 2026
+  # Enable webhook to receive:
+  # - Network events with flow correlation
+  # - Flow summary events (DDoS, exfil detection)
+  # - Anomaly alerts for operator investigation
+  webhook:
+    enabled: false  # Set to true when ingesting to ClickHouse
+    target_url: ""  # e.g., http://ingest-gateway:8888/events
+    batch_size: 100
+    flush_interval: 5s
+    timeout: 10s

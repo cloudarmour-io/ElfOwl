@@ -182,3 +182,88 @@ func LoadRulesFromConfigMap(ctx context.Context, clientset *kubernetes.Clientset
 
 	return rules, nil
 }
+
+// LoadNetworkBehaviorRules loads network behavior detection rules with fallback chain
+// ANCHOR: Mode-aware rule loading for network behavior - Feature: dual-mode network-behavior + compliance - Jul 18, 2026
+// Implements fallback chain: file (if provided) → ConfigMap (if provided) → hardcoded NetworkBehavior
+// Useful for gateways and firewalls that want to load custom network behavior rules.
+func LoadNetworkBehaviorRules(filePath string, configMapName, configMapNamespace string, k8sClientset *kubernetes.Clientset, ctx context.Context) ([]*Rule, error) {
+	// Attempt to load rules from file if provided
+	if filePath != "" {
+		rules, err := LoadRulesFromFile(filePath)
+		if err == nil {
+			return rules, nil
+		}
+		// If file load fails, try ConfigMap as fallback
+	}
+
+	// Try ConfigMap if file not provided or failed
+	if configMapName != "" && configMapNamespace != "" && k8sClientset != nil {
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		rules, err := LoadRulesFromConfigMap(ctx, k8sClientset, configMapName, configMapNamespace, "network-behavior.yaml")
+		if err == nil {
+			return rules, nil
+		}
+		// If ConfigMap load fails, fall back to hardcoded
+	}
+
+	// Fall back to hardcoded network behavior rules
+	return NetworkBehavior, nil
+}
+
+// LoadComplianceRules loads CIS compliance control rules with fallback chain
+// ANCHOR: Mode-aware rule loading for compliance - Feature: dual-mode network-behavior + compliance - Jul 18, 2026
+// Implements fallback chain: file (if provided) → ConfigMap (if provided) → hardcoded CISCompliance
+// Useful for K8s deployments that want to load custom compliance rules.
+func LoadComplianceRules(filePath string, configMapName, configMapNamespace string, k8sClientset *kubernetes.Clientset, ctx context.Context) ([]*Rule, error) {
+	// Attempt to load rules from file if provided
+	if filePath != "" {
+		rules, err := LoadRulesFromFile(filePath)
+		if err == nil {
+			return rules, nil
+		}
+		// If file load fails, try ConfigMap as fallback
+	}
+
+	// Try ConfigMap if file not provided or failed
+	if configMapName != "" && configMapNamespace != "" && k8sClientset != nil {
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		rules, err := LoadRulesFromConfigMap(ctx, k8sClientset, configMapName, configMapNamespace, "compliance.yaml")
+		if err == nil {
+			return rules, nil
+		}
+		// If ConfigMap load fails, fall back to hardcoded
+	}
+
+	// Fall back to hardcoded compliance rules
+	return CISCompliance, nil
+}
+
+// LoadDualModeRules loads both network behavior and compliance rules
+// ANCHOR: Mode-aware rule loading for dual mode - Feature: dual-mode network-behavior + compliance - Jul 18, 2026
+// Loads both NetworkBehavior and CISCompliance rule sets.
+// Behavior rules are loaded first, then compliance rules appended.
+func LoadDualModeRules(behaviorFilePath, complianceFilePath, behaviorConfigMap, complianceConfigMap, configMapNamespace string, k8sClientset *kubernetes.Clientset, ctx context.Context) ([]*Rule, error) {
+	// Load network behavior rules
+	behaviorRules, err := LoadNetworkBehaviorRules(behaviorFilePath, behaviorConfigMap, configMapNamespace, k8sClientset, ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load network behavior rules: %w", err)
+	}
+
+	// Load compliance rules
+	complianceRules, err := LoadComplianceRules(complianceFilePath, complianceConfigMap, configMapNamespace, k8sClientset, ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load compliance rules: %w", err)
+	}
+
+	// Combine both rule sets
+	allRules := make([]*Rule, 0, len(behaviorRules)+len(complianceRules))
+	allRules = append(allRules, behaviorRules...)
+	allRules = append(allRules, complianceRules...)
+
+	return allRules, nil
+}
