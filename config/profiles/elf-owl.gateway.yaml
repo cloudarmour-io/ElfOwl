@@ -73,6 +73,10 @@ agent:
     ring_buffer:
       enabled: false
       size: 65536
+    # Optional forwarded-packet visibility. Requires CAP_NET_ADMIN and clsact support.
+    tc:
+      enabled: false
+      interfaces: []
 
   # ANCHOR: Kubernetes disabled for gateway - Feature: non-K8s gateway deployment - Jul 18, 2026
   # Gateways don't need K8s integration; all metadata from bare-metal enrichment

@@ -113,6 +113,13 @@ type EBPFConfig struct {
 	TCPState   EBPFMonitorConfig `yaml:"tcp_state"`
 	PerfBuffer PerfBufferConfig  `yaml:"perf_buffer"`
 	RingBuffer RingBufferConfig  `yaml:"ring_buffer"`
+	TC         TCConfig          `yaml:"tc"`
+}
+
+// TCConfig enables optional ingress/egress classifier attachment for forwarded traffic.
+type TCConfig struct {
+	Enabled    bool     `yaml:"enabled"`
+	Interfaces []string `yaml:"interfaces"`
 }
 
 // EBPFMonitorConfig defines individual Cilium/eBPF monitor settings

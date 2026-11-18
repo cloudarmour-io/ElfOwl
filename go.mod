@@ -6,6 +6,7 @@ require (
 	// eBPF monitoring via Cilium/ebpf (production-grade, maintained)
 	// Phase 3: Removed goBPF dependency (Dec 27, 2025)
 	github.com/cilium/ebpf v0.11.0
+	github.com/vishvananda/netlink v1.3.1
 
 	// HTTP client for Owl API
 	github.com/go-resty/resty/v2 v2.11.0

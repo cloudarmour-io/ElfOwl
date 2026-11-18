@@ -18,7 +18,9 @@ import (
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/perf"
 	"github.com/cilium/ebpf/ringbuf"
+	"github.com/vishvananda/netlink"
 	"go.uber.org/zap"
+	"golang.org/x/sys/unix"
 )
 
 // ============================================================================
@@ -58,10 +60,18 @@ type ProgramSet struct {
 
 	// ANCHOR: ProgramSet link handles - Feature: tracepoint detach - Mar 23, 2026
 	// Track attached links so programs are cleanly detached on shutdown.
-	Links []link.Link
+	Links   []link.Link
+	TCLinks []TCLink
 
 	// Logger for diagnostics
 	Logger *zap.Logger
+}
+
+// TCLink records a classifier installed through rtnetlink for cleanup.
+type TCLink struct {
+	Filter netlink.Filter
+	Qdisc  netlink.Qdisc
+	Link   netlink.Link
 }
 
 // ProgramConfig controls per-program loading and reader settings.
@@ -84,6 +94,12 @@ type RingBufferOptions struct {
 	Size    int
 }
 
+// TCOptions controls optional classic TC ingress/egress attachment.
+type TCOptions struct {
+	Enabled    bool
+	Interfaces []string
+}
+
 // LoadOptions defines which programs to load and how to configure readers.
 type LoadOptions struct {
 	Process       ProgramConfig
@@ -95,6 +111,7 @@ type LoadOptions struct {
 	TCPState      ProgramConfig
 	PerfBuffer    PerfBufferOptions
 	RingBuffer    RingBufferOptions
+	TC            TCOptions
 	KernelBTFPath string
 }
 
@@ -331,6 +348,15 @@ func loadProgramSet(logger *zap.Logger, def programDefinition, opts LoadOptions)
 		primary = prog
 		break
 	}
+	var tcLinks []TCLink
+	if def.Name == NetworkProgramName {
+		tcLinks, err = attachTCPrograms(logger, programs, sectionByName, opts.TC)
+		if err != nil {
+			closeLinks(links)
+			collection.Close()
+			return nil, err
+		}
+	}
 
 	return &ProgramSet{
 		Program:  primary,
@@ -338,8 +364,66 @@ func loadProgramSet(logger *zap.Logger, def programDefinition, opts LoadOptions)
 		Maps:     allMaps,
 		Reader:   reader,
 		Links:    links,
+		TCLinks:  tcLinks,
 		Logger:   logger,
 	}, nil
+}
+
+func attachTCPrograms(logger *zap.Logger, programs map[string]*ebpf.Program, sections map[string]string, opts TCOptions) ([]TCLink, error) {
+	if !opts.Enabled || len(opts.Interfaces) == 0 {
+		return nil, nil
+	}
+	var ingress, egress *ebpf.Program
+	for name, program := range programs {
+		switch sections[name] {
+		case "classifier/elf_owl_tc_ingress":
+			ingress = program
+		case "classifier/elf_owl_tc_egress":
+			egress = program
+		}
+	}
+	if ingress == nil || egress == nil {
+		return nil, fmt.Errorf("TC enabled but classifier programs are missing")
+	}
+	var attached []TCLink
+	cleanup := func() {
+		for _, item := range attached {
+			_ = netlink.FilterDel(item.Filter)
+			if item.Qdisc != nil {
+				_ = netlink.QdiscDel(item.Qdisc)
+			}
+		}
+	}
+	for _, interfaceName := range opts.Interfaces {
+		dev, err := netlink.LinkByName(interfaceName)
+		if err != nil {
+			cleanup()
+			return nil, fmt.Errorf("find TC interface %q: %w", interfaceName, err)
+		}
+		qdisc := &netlink.GenericQdisc{QdiscAttrs: netlink.QdiscAttrs{LinkIndex: dev.Attrs().Index, Handle: netlink.MakeHandle(0xffff, 0), Parent: netlink.HANDLE_CLSACT}, QdiscType: "clsact"}
+		createdQdisc := netlink.QdiscAdd(qdisc) == nil
+		for _, spec := range []struct {
+			parent  uint32
+			program *ebpf.Program
+			name    string
+		}{{netlink.HANDLE_MIN_INGRESS, ingress, "elf_owl_tc_ingress"}, {netlink.HANDLE_MIN_EGRESS, egress, "elf_owl_tc_egress"}} {
+			filter := &netlink.BpfFilter{FilterAttrs: netlink.FilterAttrs{LinkIndex: dev.Attrs().Index, Parent: spec.parent, Handle: netlink.MakeHandle(0, 1), Priority: 1, Protocol: unix.ETH_P_ALL}, Fd: spec.program.FD(), Name: spec.name, DirectAction: true}
+			if err := netlink.FilterReplace(filter); err != nil {
+				cleanup()
+				return nil, fmt.Errorf("attach TC %s on %q: %w", spec.name, interfaceName, err)
+			}
+			attached = append(attached, TCLink{Filter: filter, Qdisc: func() netlink.Qdisc {
+				if createdQdisc {
+					return qdisc
+				}
+				return nil
+			}(), Link: dev})
+		}
+		if logger != nil {
+			logger.Info("attached optional TC flow classifiers", zap.String("interface", interfaceName))
+		}
+	}
+	return attached, nil
 }
 
 // ANCHOR: Multi-tracepoint attach helpers - Feature: advanced probes - Mar 25, 2026
@@ -361,6 +445,10 @@ func attachPrograms(logger *zap.Logger, setName string, programs map[string]*ebp
 			continue
 		}
 		section := sections[name]
+		if strings.HasPrefix(section, "classifier/") {
+			attached[name] = prog
+			continue
+		}
 		kind, group, tpName, ok := parseTracepointSection(section)
 		if !ok {
 			continue
@@ -719,6 +807,23 @@ func (ps *ProgramSet) Close() error {
 	}
 
 	var errs []error
+	closedQdiscs := make(map[netlink.Qdisc]struct{})
+	for _, item := range ps.TCLinks {
+		if item.Filter != nil {
+			if err := netlink.FilterDel(item.Filter); err != nil {
+				errs = append(errs, fmt.Errorf("remove TC filter: %w", err))
+			}
+		}
+		if item.Qdisc != nil {
+			if _, seen := closedQdiscs[item.Qdisc]; seen {
+				continue
+			}
+			closedQdiscs[item.Qdisc] = struct{}{}
+			if err := netlink.QdiscDel(item.Qdisc); err != nil {
+				errs = append(errs, fmt.Errorf("remove TC qdisc: %w", err))
+			}
+		}
+	}
 
 	// Close reader first (may be actively reading)
 	if ps.Reader != nil {

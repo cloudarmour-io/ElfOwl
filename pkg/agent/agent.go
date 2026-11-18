@@ -430,6 +430,7 @@ func (a *Agent) Start(ctx context.Context) error {
 				Enabled: a.Config.Agent.EBPF.RingBuffer.Enabled,
 				Size:    a.Config.Agent.EBPF.RingBuffer.Size,
 			},
+			TC:            ebpf.TCOptions{Enabled: a.Config.Agent.EBPF.TC.Enabled, Interfaces: a.Config.Agent.EBPF.TC.Interfaces},
 			KernelBTFPath: a.Config.Agent.EBPF.KernelBTFPath,
 		}
 

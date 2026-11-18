@@ -212,4 +212,64 @@ int network_udp_send(struct sys_enter_sendto_ctx *ctx)
 	return 0;
 }
 
+#define TC_ACT_OK 0
+
+static __always_inline int emit_tc_ipv4(struct __sk_buff *ctx, __u8 direction)
+{
+	__u8 eth[14] = {};
+	__u8 ip[20] = {};
+	struct network_event evt = {};
+	__u16 eth_proto;
+	__u8 ihl, protocol;
+	__u16 source_port = 0, destination_port = 0;
+	__u32 source_ip, destination_ip;
+	__u16 total_length;
+
+	if (bpf_skb_load_bytes(ctx, 0, eth, sizeof(eth)) < 0)
+		return TC_ACT_OK;
+	__builtin_memcpy(&eth_proto, &eth[12], sizeof(eth_proto));
+	if (bpf_ntohs(eth_proto) != 0x0800)
+		return TC_ACT_OK;
+	if (bpf_skb_load_bytes(ctx, sizeof(eth), ip, sizeof(ip)) < 0)
+		return TC_ACT_OK;
+	ihl = (ip[0] & 0x0f) * 4;
+	if (ihl < 20 || (ip[9] != IPPROTO_TCP && ip[9] != IPPROTO_UDP))
+		return TC_ACT_OK;
+	protocol = ip[9];
+	__builtin_memcpy(&total_length, &ip[2], sizeof(total_length));
+	__builtin_memcpy(&source_ip, &ip[12], sizeof(source_ip));
+	__builtin_memcpy(&destination_ip, &ip[16], sizeof(destination_ip));
+	if (bpf_skb_load_bytes(ctx, sizeof(eth) + ihl, &source_port, sizeof(source_port)) < 0 ||
+	    bpf_skb_load_bytes(ctx, sizeof(eth) + ihl + 2, &destination_port, sizeof(destination_port)) < 0)
+		return TC_ACT_OK;
+
+	evt.pid = current_pid();
+	evt.family = AF_INET;
+	evt.sport = bpf_ntohs(source_port);
+	evt.dport = bpf_ntohs(destination_port);
+	evt.saddr = source_ip;
+	evt.daddr = destination_ip;
+	evt.protocol = protocol;
+	evt.direction = direction;
+	evt.state = 0;
+	evt.netns = current_netns_inum();
+	evt.cgroup_id = bpf_get_current_cgroup_id();
+	if (bpf_ntohs(total_length) > ihl)
+		evt.bytes = bpf_ntohs(total_length) - ihl;
+	SUBMIT_EVENT(ctx, network_events, &evt);
+	return TC_ACT_OK;
+}
+
+SEC("classifier/elf_owl_tc_ingress")
+int network_tc_ingress(struct __sk_buff *ctx)
+{
+	return emit_tc_ipv4(ctx, NET_DIR_INBOUND);
+}
+
+SEC("classifier/elf_owl_tc_egress")
+int network_tc_egress(struct __sk_buff *ctx)
+{
+	return emit_tc_ipv4(ctx, NET_DIR_OUTBOUND);
+}
+
 char LICENSE[] SEC("license") = "GPL";
