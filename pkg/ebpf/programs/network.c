@@ -260,16 +260,98 @@ static __always_inline int emit_tc_ipv4(struct __sk_buff *ctx, __u8 direction)
 	return TC_ACT_OK;
 }
 
+static __always_inline int emit_tc_ipv6(struct __sk_buff *ctx, __u8 direction)
+{
+	__u8 eth[14] = {};
+	__u8 ip[40] = {};
+	__u8 ext[8] = {};
+	struct network_event evt = {};
+	__u16 eth_proto;
+	__u8 protocol;
+	__u16 source_port = 0, destination_port = 0, payload_length;
+	__u16 transport_offset = sizeof(eth) + sizeof(ip);
+	__u16 payload_end;
+	__u8 ext_len;
+	int i;
+
+	if (bpf_skb_load_bytes(ctx, 0, eth, sizeof(eth)) < 0)
+		return TC_ACT_OK;
+	__builtin_memcpy(&eth_proto, &eth[12], sizeof(eth_proto));
+	if (bpf_ntohs(eth_proto) != 0x86dd)
+		return TC_ACT_OK;
+	if (bpf_skb_load_bytes(ctx, sizeof(eth), ip, sizeof(ip)) < 0)
+		return TC_ACT_OK;
+	protocol = ip[6];
+	__builtin_memcpy(&payload_length, &ip[4], sizeof(payload_length));
+	payload_end = transport_offset + bpf_ntohs(payload_length);
+
+	/* Walk a bounded set of IPv6 extension headers before locating TCP/UDP. */
+#pragma unroll
+	for (i = 0; i < 6; i++) {
+		if (protocol == IPPROTO_TCP || protocol == IPPROTO_UDP)
+			break;
+		if (protocol != 0 && protocol != 43 && protocol != 44 && protocol != 51 && protocol != 60)
+			return TC_ACT_OK;
+		if (bpf_skb_load_bytes(ctx, transport_offset, ext, sizeof(ext)) < 0)
+			return TC_ACT_OK;
+		protocol = ext[0];
+		if (protocol == 44)
+			ext_len = 8;
+		else if (protocol == 51)
+			ext_len = ((__u16)ext[1] + 2) * 4;
+		else
+			ext_len = ((__u16)ext[1] + 1) * 8;
+		if (transport_offset + ext_len > payload_end)
+			return TC_ACT_OK;
+		transport_offset += ext_len;
+	}
+	if (protocol != IPPROTO_TCP && protocol != IPPROTO_UDP)
+		return TC_ACT_OK;
+	if (bpf_skb_load_bytes(ctx, transport_offset, &source_port, sizeof(source_port)) < 0 ||
+	    bpf_skb_load_bytes(ctx, transport_offset + 2, &destination_port, sizeof(destination_port)) < 0)
+		return TC_ACT_OK;
+
+	evt.pid = current_pid();
+	evt.family = AF_INET6;
+	evt.sport = bpf_ntohs(source_port);
+	evt.dport = bpf_ntohs(destination_port);
+	__builtin_memcpy(evt.saddr_v6, &ip[8], sizeof(evt.saddr_v6));
+	__builtin_memcpy(evt.daddr_v6, &ip[24], sizeof(evt.daddr_v6));
+	evt.protocol = protocol;
+	evt.direction = direction;
+	evt.state = 0;
+	evt.netns = current_netns_inum();
+	evt.cgroup_id = bpf_get_current_cgroup_id();
+	evt.bytes = payload_end > transport_offset ? payload_end - transport_offset : 0;
+	SUBMIT_EVENT(ctx, network_events, &evt);
+	return TC_ACT_OK;
+}
+
+static __always_inline int emit_tc_packet(struct __sk_buff *ctx, __u8 direction)
+{
+	__u8 eth[14] = {};
+	__u16 eth_proto;
+
+	if (bpf_skb_load_bytes(ctx, 0, eth, sizeof(eth)) < 0)
+		return TC_ACT_OK;
+	__builtin_memcpy(&eth_proto, &eth[12], sizeof(eth_proto));
+	if (bpf_ntohs(eth_proto) == 0x0800)
+		return emit_tc_ipv4(ctx, direction);
+	if (bpf_ntohs(eth_proto) == 0x86dd)
+		return emit_tc_ipv6(ctx, direction);
+	return TC_ACT_OK;
+}
+
 SEC("classifier/elf_owl_tc_ingress")
 int network_tc_ingress(struct __sk_buff *ctx)
 {
-	return emit_tc_ipv4(ctx, NET_DIR_INBOUND);
+	return emit_tc_packet(ctx, NET_DIR_INBOUND);
 }
 
 SEC("classifier/elf_owl_tc_egress")
 int network_tc_egress(struct __sk_buff *ctx)
 {
-	return emit_tc_ipv4(ctx, NET_DIR_OUTBOUND);
+	return emit_tc_packet(ctx, NET_DIR_OUTBOUND);
 }
 
 char LICENSE[] SEC("license") = "GPL";
