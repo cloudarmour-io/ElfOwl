@@ -163,9 +163,12 @@ type NetworkContext struct {
 	Direction          string `json:"direction"` // inbound, outbound
 	ConnectionState    string `json:"connection_state"`
 	NetworkNamespaceID uint32 `json:"network_namespace_id"`
-	IngressRestricted  bool   `json:"ingress_restricted"`
-	EgressRestricted   bool   `json:"egress_restricted"`
-	NamespaceIsolation bool   `json:"namespace_isolation"`
+	// PacketOnly marks TC events that have no reliable process identity. These
+	// events must not trigger process/proc or reverse-DNS enrichment by default.
+	PacketOnly         bool `json:"packet_only,omitempty"`
+	IngressRestricted  bool `json:"ingress_restricted"`
+	EgressRestricted   bool `json:"egress_restricted"`
+	NamespaceIsolation bool `json:"namespace_isolation"`
 
 	// Flow tracking (cross-environment)
 	// ANCHOR: Flow-level enrichment - Feature: bidirectional conntrack-style correlation - Jul 18, 2026
@@ -174,15 +177,15 @@ type NetworkContext struct {
 	// BytesIn/BytesOut track per-direction traffic for data exfiltration detection
 	// StateTransition describes state machine progression (NEW_TO_ESTABLISHED, etc.)
 	// IsReversed indicates this event is the reverse direction of an established flow
-	FlowID             string `json:"flow_id,omitempty"`             // hash of canonical flow key
-	FlowStartTime      int64  `json:"flow_start_time,omitempty"`     // Unix timestamp when flow created
-	FlowDuration       int64  `json:"flow_duration_seconds,omitempty"` // derived from now - flow_start_time
-	BytesIn            uint64 `json:"bytes_in,omitempty"`            // bytes received (reverse direction)
-	BytesOut           uint64 `json:"bytes_out,omitempty"`           // bytes sent (forward direction)
-	PacketsIn          uint64 `json:"packets_in,omitempty"`
-	PacketsOut         uint64 `json:"packets_out,omitempty"`
-	StateTransition    string `json:"state_transition,omitempty"`    // e.g., "NEW_TO_ESTABLISHED", "ESTABLISHED_TO_CLOSING"
-	IsReversed         bool   `json:"is_reversed,omitempty"`         // true if reverse direction of flow
+	FlowID          string `json:"flow_id,omitempty"`               // hash of canonical flow key
+	FlowStartTime   int64  `json:"flow_start_time,omitempty"`       // Unix timestamp when flow created
+	FlowDuration    int64  `json:"flow_duration_seconds,omitempty"` // derived from now - flow_start_time
+	BytesIn         uint64 `json:"bytes_in,omitempty"`              // bytes received (reverse direction)
+	BytesOut        uint64 `json:"bytes_out,omitempty"`             // bytes sent (forward direction)
+	PacketsIn       uint64 `json:"packets_in,omitempty"`
+	PacketsOut      uint64 `json:"packets_out,omitempty"`
+	StateTransition string `json:"state_transition,omitempty"` // e.g., "NEW_TO_ESTABLISHED", "ESTABLISHED_TO_CLOSING"
+	IsReversed      bool   `json:"is_reversed,omitempty"`      // true if reverse direction of flow
 
 	// Optional environment-specific enrichment (populated by active backend)
 	// ANCHOR: Pluggable enrichment context - Feature: environment-agnostic core - Jul 18, 2026
@@ -190,7 +193,7 @@ type NetworkContext struct {
 	// - K8s: pod name, namespace, service account, RBAC level
 	// - Bare-metal: hostname, process, user, SELinux context
 	// - Cloud: instance ID, tags, IAM role
-	SourceEnrichment      interface{} `json:"source_enrichment,omitempty"`  // *BareMetalSourceContext or *K8sSourceContext
+	SourceEnrichment      interface{} `json:"source_enrichment,omitempty"` // *BareMetalSourceContext or *K8sSourceContext
 	DestinationEnrichment interface{} `json:"dest_enrichment,omitempty"`
 }
 
@@ -199,12 +202,12 @@ type NetworkContext struct {
 // Enriches network flows with host metadata, process info, and security context.
 // Used on gateways, bare-metal servers, and VMs without Kubernetes.
 type BareMetalSourceContext struct {
-	Hostname        string `json:"hostname"`                 // Resolved hostname (reverse DNS or local)
-	ProcessName     string `json:"process_name,omitempty"`   // Executable name
-	ProcessPID      uint32 `json:"process_pid,omitempty"`    // Process ID
-	User            string `json:"user,omitempty"`           // Process owner username
-	UID             uint32 `json:"uid,omitempty"`            // Numeric UID
-	GID             uint32 `json:"gid,omitempty"`            // Numeric GID
+	Hostname        string `json:"hostname"`                   // Resolved hostname (reverse DNS or local)
+	ProcessName     string `json:"process_name,omitempty"`     // Executable name
+	ProcessPID      uint32 `json:"process_pid,omitempty"`      // Process ID
+	User            string `json:"user,omitempty"`             // Process owner username
+	UID             uint32 `json:"uid,omitempty"`              // Numeric UID
+	GID             uint32 `json:"gid,omitempty"`              // Numeric GID
 	SELinuxContext  string `json:"selinux_context,omitempty"`  // SELinux label
 	SecurityProfile string `json:"security_profile,omitempty"` // AppArmor, SELinux, etc.
 }
@@ -214,14 +217,14 @@ type BareMetalSourceContext struct {
 // Enriches network flows with pod, service account, RBAC, and network policy context.
 // Used when elf-owl runs as K8s DaemonSet or when monitoring K8s cluster traffic.
 type K8sSourceContext struct {
-	Namespace              string `json:"namespace,omitempty"`
-	PodName                string `json:"pod_name,omitempty"`
-	PodUID                 string `json:"pod_uid,omitempty"`
-	ServiceAccount         string `json:"service_account,omitempty"`
+	Namespace              string            `json:"namespace,omitempty"`
+	PodName                string            `json:"pod_name,omitempty"`
+	PodUID                 string            `json:"pod_uid,omitempty"`
+	ServiceAccount         string            `json:"service_account,omitempty"`
 	Labels                 map[string]string `json:"labels,omitempty"`
-	RBACLevel              int    `json:"rbac_level,omitempty"`
-	RBACEnforced           bool   `json:"rbac_enforced,omitempty"`
-	ServiceAccountTokenAge int64  `json:"service_account_token_age,omitempty"`
+	RBACLevel              int               `json:"rbac_level,omitempty"`
+	RBACEnforced           bool              `json:"rbac_enforced,omitempty"`
+	ServiceAccountTokenAge int64             `json:"service_account_token_age,omitempty"`
 }
 
 // DNSContext captures DNS query metadata from cilium/ebpf events
@@ -245,7 +248,7 @@ type TLSContext struct {
 	SNI            string   `json:"sni,omitempty"`
 	// ANCHOR: TLS certificate fields - Feature: cert_sha256 via active probe - Apr 26, 2026
 	// Populated by userspace TLS probe to host:443 after SNI is known, matching vaanvil approach.
-	CertSHA256  string `json:"cert_sha256,omitempty"`
-	CertIssuer  string `json:"cert_issuer,omitempty"`
-	CertExpiry  int64  `json:"cert_expiry,omitempty"`
+	CertSHA256 string `json:"cert_sha256,omitempty"`
+	CertIssuer string `json:"cert_issuer,omitempty"`
+	CertExpiry int64  `json:"cert_expiry,omitempty"`
 }

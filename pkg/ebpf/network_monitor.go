@@ -162,6 +162,7 @@ func (nm *NetworkMonitor) eventLoop(ctx context.Context) {
 				Direction:          NetworkDirection(evt.Direction),
 				ConnectionState:    TCPStateName(evt.State),
 				NetworkNamespaceID: evt.NetNS,
+				PacketOnly:         evt.PID == 0,
 			}
 
 			enriched := &enrichment.EnrichedEvent{

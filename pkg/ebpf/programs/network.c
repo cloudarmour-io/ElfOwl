@@ -214,36 +214,67 @@ int network_udp_send(struct sys_enter_sendto_ctx *ctx)
 
 #define TC_ACT_OK 0
 
+static __always_inline int tc_l3_offset(struct __sk_buff *ctx, __u16 *offset, __u16 *protocol)
+{
+	__u8 eth[22] = {};
+	__u16 eth_proto;
+	__u16 cursor = 14;
+	__u16 skb_protocol = bpf_ntohs(ctx->protocol);
+	int i;
+
+	// TUN and similar devices expose an IP packet without an Ethernet header.
+	if (skb_protocol == 0x0800 || skb_protocol == 0x86dd) {
+		*offset = 0;
+		*protocol = skb_protocol;
+		return 0;
+	}
+	if (bpf_skb_load_bytes(ctx, 0, eth, sizeof(eth)) < 0)
+		return -1;
+	__builtin_memcpy(&eth_proto, &eth[12], sizeof(eth_proto));
+	eth_proto = bpf_ntohs(eth_proto);
+	#pragma unroll
+	for (i = 0; i < 2; i++) {
+		if (eth_proto != 0x8100 && eth_proto != 0x88a8)
+			break;
+		__builtin_memcpy(&eth_proto, &eth[cursor], sizeof(eth_proto));
+		eth_proto = bpf_ntohs(eth_proto);
+		cursor += 4;
+	}
+	*offset = cursor;
+	*protocol = eth_proto;
+	return 0;
+}
+
 static __always_inline int emit_tc_ipv4(struct __sk_buff *ctx, __u8 direction)
 {
-	__u8 eth[14] = {};
 	__u8 ip[20] = {};
 	struct network_event evt = {};
-	__u16 eth_proto;
 	__u8 ihl, protocol;
 	__u16 source_port = 0, destination_port = 0;
 	__u32 source_ip, destination_ip;
-	__u16 total_length;
+	__u16 total_length, fragment;
+	__u16 l3_offset, l3_protocol;
 
-	if (bpf_skb_load_bytes(ctx, 0, eth, sizeof(eth)) < 0)
+	if (tc_l3_offset(ctx, &l3_offset, &l3_protocol) < 0 || l3_protocol != 0x0800)
 		return TC_ACT_OK;
-	__builtin_memcpy(&eth_proto, &eth[12], sizeof(eth_proto));
-	if (bpf_ntohs(eth_proto) != 0x0800)
-		return TC_ACT_OK;
-	if (bpf_skb_load_bytes(ctx, sizeof(eth), ip, sizeof(ip)) < 0)
+	if (bpf_skb_load_bytes(ctx, l3_offset, ip, sizeof(ip)) < 0)
 		return TC_ACT_OK;
 	ihl = (ip[0] & 0x0f) * 4;
 	if (ihl < 20 || (ip[9] != IPPROTO_TCP && ip[9] != IPPROTO_UDP))
+		return TC_ACT_OK;
+	__builtin_memcpy(&fragment, &ip[6], sizeof(fragment));
+	if ((bpf_ntohs(fragment) & 0x1fff) != 0)
 		return TC_ACT_OK;
 	protocol = ip[9];
 	__builtin_memcpy(&total_length, &ip[2], sizeof(total_length));
 	__builtin_memcpy(&source_ip, &ip[12], sizeof(source_ip));
 	__builtin_memcpy(&destination_ip, &ip[16], sizeof(destination_ip));
-	if (bpf_skb_load_bytes(ctx, sizeof(eth) + ihl, &source_port, sizeof(source_port)) < 0 ||
-	    bpf_skb_load_bytes(ctx, sizeof(eth) + ihl + 2, &destination_port, sizeof(destination_port)) < 0)
+	if (bpf_skb_load_bytes(ctx, l3_offset + ihl, &source_port, sizeof(source_port)) < 0 ||
+	    bpf_skb_load_bytes(ctx, l3_offset + ihl + 2, &destination_port, sizeof(destination_port)) < 0)
 		return TC_ACT_OK;
 
-	evt.pid = current_pid();
+	// TC runs in softirq context; process identity is not attributable to this packet.
+	evt.pid = 0;
 	evt.family = AF_INET;
 	evt.sport = bpf_ntohs(source_port);
 	evt.dport = bpf_ntohs(destination_port);
@@ -253,36 +284,37 @@ static __always_inline int emit_tc_ipv4(struct __sk_buff *ctx, __u8 direction)
 	evt.direction = direction;
 	evt.state = 0;
 	evt.netns = current_netns_inum();
-	evt.cgroup_id = bpf_get_current_cgroup_id();
+	evt.cgroup_id = 0;
 	if (bpf_ntohs(total_length) > ihl)
 		evt.bytes = bpf_ntohs(total_length) - ihl;
 	SUBMIT_EVENT(ctx, network_events, &evt);
 	return TC_ACT_OK;
 }
 
+// ANCHOR: TC IPv6 parser - Feature: IPv6 forwarding telemetry with bounded extension headers - Jul 26, 2026
 static __always_inline int emit_tc_ipv6(struct __sk_buff *ctx, __u8 direction)
 {
-	__u8 eth[14] = {};
 	__u8 ip[40] = {};
 	__u8 ext[8] = {};
 	struct network_event evt = {};
 	__u16 eth_proto;
 	__u8 protocol;
 	__u16 source_port = 0, destination_port = 0, payload_length;
-	__u16 transport_offset = sizeof(eth) + sizeof(ip);
+	__u16 transport_offset;
 	__u16 payload_end;
-	__u8 ext_len;
+	__u16 ext_len;
+	__u8 header_type;
+	__u16 fragment;
+	__u16 l3_offset, l3_protocol;
 	int i;
 
-	if (bpf_skb_load_bytes(ctx, 0, eth, sizeof(eth)) < 0)
+	if (tc_l3_offset(ctx, &l3_offset, &l3_protocol) < 0 || l3_protocol != 0x86dd)
 		return TC_ACT_OK;
-	__builtin_memcpy(&eth_proto, &eth[12], sizeof(eth_proto));
-	if (bpf_ntohs(eth_proto) != 0x86dd)
-		return TC_ACT_OK;
-	if (bpf_skb_load_bytes(ctx, sizeof(eth), ip, sizeof(ip)) < 0)
+	if (bpf_skb_load_bytes(ctx, l3_offset, ip, sizeof(ip)) < 0)
 		return TC_ACT_OK;
 	protocol = ip[6];
 	__builtin_memcpy(&payload_length, &ip[4], sizeof(payload_length));
+	transport_offset = l3_offset + sizeof(ip);
 	payload_end = transport_offset + bpf_ntohs(payload_length);
 
 	/* Walk a bounded set of IPv6 extension headers before locating TCP/UDP. */
@@ -292,18 +324,23 @@ static __always_inline int emit_tc_ipv6(struct __sk_buff *ctx, __u8 direction)
 			break;
 		if (protocol != 0 && protocol != 43 && protocol != 44 && protocol != 51 && protocol != 60)
 			return TC_ACT_OK;
+		header_type = protocol;
 		if (bpf_skb_load_bytes(ctx, transport_offset, ext, sizeof(ext)) < 0)
 			return TC_ACT_OK;
-		protocol = ext[0];
-		if (protocol == 44)
+		if (header_type == 44) {
+			__builtin_memcpy(&fragment, &ext[2], sizeof(fragment));
+			if ((bpf_ntohs(fragment) & 0xfff8) != 0)
+				return TC_ACT_OK;
 			ext_len = 8;
-		else if (protocol == 51)
+		} else if (header_type == 51) {
 			ext_len = ((__u16)ext[1] + 2) * 4;
-		else
+		} else {
 			ext_len = ((__u16)ext[1] + 1) * 8;
+		}
 		if (transport_offset + ext_len > payload_end)
 			return TC_ACT_OK;
 		transport_offset += ext_len;
+		protocol = ext[0];
 	}
 	if (protocol != IPPROTO_TCP && protocol != IPPROTO_UDP)
 		return TC_ACT_OK;
@@ -311,7 +348,8 @@ static __always_inline int emit_tc_ipv6(struct __sk_buff *ctx, __u8 direction)
 	    bpf_skb_load_bytes(ctx, transport_offset + 2, &destination_port, sizeof(destination_port)) < 0)
 		return TC_ACT_OK;
 
-	evt.pid = current_pid();
+	// TC runs in softirq context; process identity is not attributable to this packet.
+	evt.pid = 0;
 	evt.family = AF_INET6;
 	evt.sport = bpf_ntohs(source_port);
 	evt.dport = bpf_ntohs(destination_port);
@@ -321,7 +359,7 @@ static __always_inline int emit_tc_ipv6(struct __sk_buff *ctx, __u8 direction)
 	evt.direction = direction;
 	evt.state = 0;
 	evt.netns = current_netns_inum();
-	evt.cgroup_id = bpf_get_current_cgroup_id();
+	evt.cgroup_id = 0;
 	evt.bytes = payload_end > transport_offset ? payload_end - transport_offset : 0;
 	SUBMIT_EVENT(ctx, network_events, &evt);
 	return TC_ACT_OK;
@@ -329,15 +367,13 @@ static __always_inline int emit_tc_ipv6(struct __sk_buff *ctx, __u8 direction)
 
 static __always_inline int emit_tc_packet(struct __sk_buff *ctx, __u8 direction)
 {
-	__u8 eth[14] = {};
-	__u16 eth_proto;
+	__u16 eth_proto, l3_offset;
 
-	if (bpf_skb_load_bytes(ctx, 0, eth, sizeof(eth)) < 0)
+	if (tc_l3_offset(ctx, &l3_offset, &eth_proto) < 0)
 		return TC_ACT_OK;
-	__builtin_memcpy(&eth_proto, &eth[12], sizeof(eth_proto));
-	if (bpf_ntohs(eth_proto) == 0x0800)
+	if (eth_proto == 0x0800)
 		return emit_tc_ipv4(ctx, direction);
-	if (bpf_ntohs(eth_proto) == 0x86dd)
+	if (eth_proto == 0x86dd)
 		return emit_tc_ipv6(ctx, direction);
 	return TC_ACT_OK;
 }

@@ -6,8 +6,12 @@
 struct tcp_state_event {
     __u64 timestamp;
     __u32 new_state;
+    __u16 family;
+    __u16 reserved;
     __u32 source_ip;
     __u32 destination_ip;
+    __u8 source_ip_v6[16];
+    __u8 destination_ip_v6[16];
     __u16 source_port;
     __u16 destination_port;
     __u32 netns_id;
@@ -39,8 +43,14 @@ int trace_tcp_set_state(struct pt_regs *ctx) {
     event->timestamp = bpf_ktime_get_ns();
     event->new_state = new_state;
 	if (sk) {
-		event->source_ip = BPF_CORE_READ(sk, __sk_common.skc_rcv_saddr);
-		event->destination_ip = BPF_CORE_READ(sk, __sk_common.skc_daddr);
+		event->family = BPF_CORE_READ(sk, __sk_common.skc_family);
+		if (event->family == AF_INET6) {
+			BPF_CORE_READ_INTO(event->source_ip_v6, sk, __sk_common.skc_v6_rcv_saddr);
+			BPF_CORE_READ_INTO(event->destination_ip_v6, sk, __sk_common.skc_v6_daddr);
+		} else {
+			event->source_ip = BPF_CORE_READ(sk, __sk_common.skc_rcv_saddr);
+			event->destination_ip = BPF_CORE_READ(sk, __sk_common.skc_daddr);
+		}
 		event->source_port = BPF_CORE_READ(sk, __sk_common.skc_num);
 		event->destination_port = bpf_ntohs(BPF_CORE_READ(sk, __sk_common.skc_dport));
 		struct net *net = BPF_CORE_READ(sk, __sk_common.skc_net.net);

@@ -635,7 +635,20 @@ func (a *Agent) handleRuntimeEvent(
 		return
 	}
 
-	enrichedEvent, err := enrichFn(ctx, rawEnriched.RawEvent)
+	// TC packet events intentionally carry no process identity. Avoid expensive
+	// process/proc and reverse-DNS enrichment for them; Kubernetes-only mode must
+	// still reject them because they cannot be associated with a pod.
+	enrichedEvent := rawEnriched
+	var err error
+	packetOnly := rawEnriched.Network != nil && rawEnriched.Network.PacketOnly
+	if packetOnly && a.Config.Agent.Enrichment.KubernetesOnly {
+		a.Logger.Debug(hostDiscardMsg)
+		a.MetricsRegistry.RecordHostEventDiscarded()
+		return
+	}
+	if !packetOnly {
+		enrichedEvent, err = enrichFn(ctx, rawEnriched.RawEvent)
+	}
 	if err != nil {
 		// ANCHOR: path filter discard - Bug: ErrNoKubernetesContext bypass on kubernetes_only=false - May 1, 2026
 		// ErrFilePathFiltered / ErrNetworkProtocolFiltered mean the operator explicitly excluded
@@ -1154,13 +1167,21 @@ func (a *Agent) collectMetrics(ctx context.Context) {
 					recorder.SetFlowTrackerMemory(flowStats.MemoryUsedMB)
 				}
 				if recorder, ok := a.MetricsRegistry.(interface{ RecordFlowTrackerExpiration() }); ok {
-					for i := previousExpired; i < flowStats.FlowsExpiredTTL; i++ {
-						recorder.RecordFlowTrackerExpiration()
+					if batch, ok := a.MetricsRegistry.(interface{ RecordFlowTrackerExpirations(int64) }); ok {
+						batch.RecordFlowTrackerExpirations(flowStats.FlowsExpiredTTL - previousExpired)
+					} else {
+						for i := previousExpired; i < flowStats.FlowsExpiredTTL; i++ {
+							recorder.RecordFlowTrackerExpiration()
+						}
 					}
 				}
 				if recorder, ok := a.MetricsRegistry.(interface{ RecordFlowTrackerEviction() }); ok {
-					for i := previousEvicted; i < flowStats.FlowsEvictedMem; i++ {
-						recorder.RecordFlowTrackerEviction()
+					if batch, ok := a.MetricsRegistry.(interface{ RecordFlowTrackerEvictions(int64) }); ok {
+						batch.RecordFlowTrackerEvictions(flowStats.FlowsEvictedMem - previousEvicted)
+					} else {
+						for i := previousEvicted; i < flowStats.FlowsEvictedMem; i++ {
+							recorder.RecordFlowTrackerEviction()
+						}
 					}
 				}
 				previousExpired = flowStats.FlowsExpiredTTL
@@ -1607,7 +1628,7 @@ func (a *Agent) handleTCPStateEvents(ctx context.Context) {
 				zap.String("flow_state", network.FlowStateName(flowState)),
 			)
 
-			if event.SourceIP != 0 && event.DestinationIP != 0 {
+			if event.HasAddresses() {
 				key, isNew, state := a.FlowTracker.AddOrUpdateFlow(
 					event.SourceAddress(), event.DestinationAddress(),
 					event.SourcePort, event.DestinationPort, "tcp", event.NetnsID, 0, flowState)
@@ -1615,7 +1636,7 @@ func (a *Agent) handleTCPStateEvents(ctx context.Context) {
 					a.MetricsRegistry.RecordFlowCreated()
 				}
 				if state == network.FlowStateCLOSED {
-					a.FlowTracker.CloseFlow(key, "tcp_state")
+					a.FlowTracker.CloseFlow(key, network.FlowCloseReason(network.TCPStateName(event.NewState)))
 				}
 			}
 			a.MetricsRegistry.RecordEventProcessed()

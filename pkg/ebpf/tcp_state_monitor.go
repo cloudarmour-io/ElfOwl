@@ -6,9 +6,11 @@ package ebpf
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/cilium/ebpf/ringbuf"
 	"go.uber.org/zap"
@@ -31,18 +33,35 @@ type TCPStateMonitor struct {
 type TCPStateEvent struct {
 	Timestamp       uint64
 	NewState        uint32
+	Family          uint16
+	Reserved        uint16
 	SourceIP        uint32
 	DestinationIP   uint32
+	SourceIPV6      [16]byte
+	DestinationIPV6 [16]byte
 	SourcePort      uint16
 	DestinationPort uint16
 	NetnsID         uint32
 }
 
 func (e *TCPStateEvent) SourceAddress() string {
+	if e.Family == 10 {
+		return net.IP(e.SourceIPV6[:]).String()
+	}
 	return net.IPv4(byte(e.SourceIP), byte(e.SourceIP>>8), byte(e.SourceIP>>16), byte(e.SourceIP>>24)).String()
 }
 func (e *TCPStateEvent) DestinationAddress() string {
+	if e.Family == 10 {
+		return net.IP(e.DestinationIPV6[:]).String()
+	}
 	return net.IPv4(byte(e.DestinationIP), byte(e.DestinationIP>>8), byte(e.DestinationIP>>16), byte(e.DestinationIP>>24)).String()
+}
+
+func (e *TCPStateEvent) HasAddresses() bool {
+	if e.Family == 10 {
+		return !net.IP(e.SourceIPV6[:]).IsUnspecified() && !net.IP(e.DestinationIPV6[:]).IsUnspecified()
+	}
+	return e.SourceIP != 0 && e.DestinationIP != 0
 }
 
 // NewTCPStateMonitor creates a new TCP state monitor
@@ -122,8 +141,12 @@ func (m *TCPStateMonitor) readEvents() {
 				return
 			default:
 			}
+			if errors.Is(err, ringbuf.ErrClosed) {
+				return
+			}
 			m.Logger.Debug("failed to read tcp state event", zap.Error(err))
-			return
+			time.Sleep(100 * time.Millisecond)
+			continue
 		}
 		readCount++
 

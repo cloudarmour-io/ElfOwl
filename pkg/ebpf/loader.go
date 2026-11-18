@@ -270,6 +270,16 @@ func loadProgramSet(logger *zap.Logger, def programDefinition, opts LoadOptions)
 		}
 		kernelTypes = btfSpec
 	}
+	// Keep optional TC classifiers out of the collection when TC is disabled.
+	// This prevents an incompatible classifier from failing the normal socket
+	// monitor during verifier/load, even though it will never be attached.
+	if def.Name == NetworkProgramName && !opts.TC.Enabled {
+		for name, prog := range spec.Programs {
+			if strings.HasPrefix(prog.SectionName, "classifier/") {
+				delete(spec.Programs, name)
+			}
+		}
+	}
 
 	collection, err := ebpf.NewCollectionWithOptions(spec, ebpf.CollectionOptions{
 		Programs: ebpf.ProgramOptions{
@@ -352,6 +362,9 @@ func loadProgramSet(logger *zap.Logger, def programDefinition, opts LoadOptions)
 	if def.Name == NetworkProgramName {
 		tcLinks, err = attachTCPrograms(logger, programs, sectionByName, opts.TC)
 		if err != nil {
+			if reader != nil {
+				_ = reader.Close()
+			}
 			closeLinks(links)
 			collection.Close()
 			return nil, err
@@ -387,9 +400,14 @@ func attachTCPrograms(logger *zap.Logger, programs map[string]*ebpf.Program, sec
 	}
 	var attached []TCLink
 	cleanup := func() {
+		deletedQdiscs := make(map[netlink.Qdisc]struct{})
 		for _, item := range attached {
 			_ = netlink.FilterDel(item.Filter)
 			if item.Qdisc != nil {
+				if _, ok := deletedQdiscs[item.Qdisc]; ok {
+					continue
+				}
+				deletedQdiscs[item.Qdisc] = struct{}{}
 				_ = netlink.QdiscDel(item.Qdisc)
 			}
 		}
@@ -401,14 +419,24 @@ func attachTCPrograms(logger *zap.Logger, programs map[string]*ebpf.Program, sec
 			return nil, fmt.Errorf("find TC interface %q: %w", interfaceName, err)
 		}
 		qdisc := &netlink.GenericQdisc{QdiscAttrs: netlink.QdiscAttrs{LinkIndex: dev.Attrs().Index, Handle: netlink.MakeHandle(0xffff, 0), Parent: netlink.HANDLE_CLSACT}, QdiscType: "clsact"}
-		createdQdisc := netlink.QdiscAdd(qdisc) == nil
+		qdiscErr := netlink.QdiscAdd(qdisc)
+		createdQdisc := qdiscErr == nil
+		if qdiscErr != nil && !errors.Is(qdiscErr, unix.EEXIST) {
+			cleanup()
+			return nil, fmt.Errorf("create clsact qdisc on %q: %w", interfaceName, qdiscErr)
+		}
 		for _, spec := range []struct {
 			parent  uint32
+			handle  uint16
 			program *ebpf.Program
 			name    string
-		}{{netlink.HANDLE_MIN_INGRESS, ingress, "elf_owl_tc_ingress"}, {netlink.HANDLE_MIN_EGRESS, egress, "elf_owl_tc_egress"}} {
-			filter := &netlink.BpfFilter{FilterAttrs: netlink.FilterAttrs{LinkIndex: dev.Attrs().Index, Parent: spec.parent, Handle: netlink.MakeHandle(0, 1), Priority: 1, Protocol: unix.ETH_P_ALL}, Fd: spec.program.FD(), Name: spec.name, DirectAction: true}
-			if err := netlink.FilterReplace(filter); err != nil {
+		}{{netlink.HANDLE_MIN_INGRESS, 0xE10, ingress, "elf_owl_tc_ingress"}, {netlink.HANDLE_MIN_EGRESS, 0xE11, egress, "elf_owl_tc_egress"}} {
+			filter := &netlink.BpfFilter{FilterAttrs: netlink.FilterAttrs{LinkIndex: dev.Attrs().Index, Parent: spec.parent, Handle: netlink.MakeHandle(0, spec.handle), Priority: 30000, Protocol: unix.ETH_P_ALL}, Fd: spec.program.FD(), Name: spec.name, DirectAction: true}
+			// Add, rather than replace, so ElfOwl cannot overwrite another tool's filter.
+			if err := netlink.FilterAdd(filter); err != nil {
+				if createdQdisc {
+					_ = netlink.QdiscDel(qdisc)
+				}
 				cleanup()
 				return nil, fmt.Errorf("attach TC %s on %q: %w", spec.name, interfaceName, err)
 			}

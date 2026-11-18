@@ -12,14 +12,14 @@ import (
 
 // Registry holds all Prometheus metrics for the agent
 type Registry struct {
-	eventsProcessed   prometheus.Counter
-	violationsFound   prometheus.Counter
-	eventsBuffered    prometheus.Gauge
-	pushSuccess       prometheus.Counter
-	pushFailure       prometheus.Counter
-	pushLatency       prometheus.Histogram
-	enrichmentErrors  prometheus.Counter
-	ruleMatchErrors   prometheus.Counter
+	eventsProcessed  prometheus.Counter
+	violationsFound  prometheus.Counter
+	eventsBuffered   prometheus.Gauge
+	pushSuccess      prometheus.Counter
+	pushFailure      prometheus.Counter
+	pushLatency      prometheus.Histogram
+	enrichmentErrors prometheus.Counter
+	ruleMatchErrors  prometheus.Counter
 	// ANCHOR: Host event discard metric - Filter: K8s-native compliance - Mar 24, 2026
 	hostEventsDiscarded prometheus.Counter
 	// ANCHOR: K8s lookup fail-closed discard metric - Fix PR-23 #7 - Mar 26, 2026
@@ -34,11 +34,11 @@ type Registry struct {
 	flowBytesTransferred prometheus.Histogram
 
 	// Anomaly detection metrics for network behavior detection
-	anomaliesDetectedTotal      prometheus.Counter
-	ddosFloodsDetectedTotal     prometheus.Counter
-	portScansDetectedTotal      prometheus.Counter
-	dataExfiltrationTotal       prometheus.Counter
-	tunnelsDetectedTotal        prometheus.Counter
+	anomaliesDetectedTotal  prometheus.Counter
+	ddosFloodsDetectedTotal prometheus.Counter
+	portScansDetectedTotal  prometheus.Counter
+	dataExfiltrationTotal   prometheus.Counter
+	tunnelsDetectedTotal    prometheus.Counter
 
 	// Flow tracker internal metrics for monitoring engine health
 	flowTrackerMemoryMB    prometheus.Gauge
@@ -169,8 +169,10 @@ func (r *Registry) RecordViolationFound() {
 //
 // ANCHOR: Batch violation counter - Medium finding fix - Feb 18, 2026
 // WHY: RecordViolationFound() was called once per event even when the rule
-//      engine matched multiple violations, causing elf_owl_violations_found_total
-//      to undercount by (n-1) for every multi-violation event.
+//
+//	engine matched multiple violations, causing elf_owl_violations_found_total
+//	to undercount by (n-1) for every multi-violation event.
+//
 // WHAT: Use Counter.Add(n) to increment by the actual number of violations.
 // HOW: prometheus.Counter.Add() is the idiomatic batch-increment API.
 func (r *Registry) RecordViolationsFound(n int) {
@@ -284,6 +286,18 @@ func (r *Registry) RecordFlowTrackerEviction() {
 // RecordFlowTrackerExpiration records a flow tracker TTL expiration
 func (r *Registry) RecordFlowTrackerExpiration() {
 	r.flowTrackerExpirations.Inc()
+}
+
+func (r *Registry) RecordFlowTrackerExpirations(count int64) {
+	if count > 0 {
+		r.flowTrackerExpirations.Add(float64(count))
+	}
+}
+
+func (r *Registry) RecordFlowTrackerEvictions(count int64) {
+	if count > 0 {
+		r.flowTrackerEvictions.Add(float64(count))
+	}
 }
 
 // Simple atomic counters as fallback

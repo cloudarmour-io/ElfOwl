@@ -63,6 +63,8 @@ type FlowRecord struct {
 	PacketsRecv uint64
 	CloseReason string // "fin", "reset", "timeout", "evicted"
 	IsReversed  bool   // track if this is reverse direction of established flow
+	firstIP     string // orientation of the first event, independent of canonical key order
+	firstPort   uint16
 	heapIndex   int
 }
 
@@ -116,7 +118,9 @@ func (ft *FlowTracker) AddOrUpdateFlow(srcIP, dstIP string, srcPort, dstPort uin
 	defer ft.mu.Unlock()
 
 	// Create canonical flow key (order-independent)
-	key := createCanonicalFlowKey(srcIP, dstIP, srcPort, dstPort, protocol, netnsID)
+	normalizedSrcIP := normalizeIP(srcIP)
+	normalizedDstIP := normalizeIP(dstIP)
+	key := createCanonicalFlowKey(normalizedSrcIP, normalizedDstIP, srcPort, dstPort, protocol, netnsID)
 	keyStr := key.String()
 
 	// Check if flow exists
@@ -131,7 +135,7 @@ func (ft *FlowTracker) AddOrUpdateFlow(srcIP, dstIP string, srcPort, dstPort uin
 		flow.State = nextFlowState(flow.State, newState)
 
 		// Track if this is reverse direction
-		if flow.Key.IP1 == srcIP && flow.Key.Port1 == srcPort {
+		if normalizedSrcIP == flow.firstIP && srcPort == flow.firstPort {
 			// Forward direction
 			flow.BytesSent += bytes
 			flow.PacketsSent++
@@ -141,6 +145,7 @@ func (ft *FlowTracker) AddOrUpdateFlow(srcIP, dstIP string, srcPort, dstPort uin
 			flow.PacketsRecv++
 			isReversed = true
 		}
+		flow.IsReversed = isReversed
 
 		return &key, false, flow.State
 	}
@@ -155,6 +160,8 @@ func (ft *FlowTracker) AddOrUpdateFlow(srcIP, dstIP string, srcPort, dstPort uin
 		BytesSent:   bytes,
 		PacketsSent: 1,
 		IsReversed:  isReversed,
+		firstIP:     normalizedSrcIP,
+		firstPort:   srcPort,
 		heapIndex:   -1,
 	}
 
@@ -384,9 +391,6 @@ func nextFlowState(current, incoming FlowState) FlowState {
 	}
 	if incoming == FlowStateCLOSED || current == FlowStateNEW {
 		return incoming
-	}
-	if current == FlowStateESTABLISHED && incoming == FlowStateNEW {
-		return current
 	}
 	if current == FlowStateCLOSING && incoming != FlowStateCLOSED {
 		return current
