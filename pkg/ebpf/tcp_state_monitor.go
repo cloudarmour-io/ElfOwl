@@ -7,6 +7,8 @@ import (
 	"bytes"
 	"encoding/binary"
 	"fmt"
+	"net"
+	"sync"
 
 	"github.com/cilium/ebpf/ringbuf"
 	"go.uber.org/zap"
@@ -21,13 +23,26 @@ type TCPStateMonitor struct {
 	reader       *ringbuf.Reader
 	eventChannel chan *TCPStateEvent
 	stopChan     chan struct{}
+	stopOnce     sync.Once
 }
 
 // TCPStateEvent represents a TCP state change event from kernel
 // Note: This must match the struct definition in tcp_state.c
 type TCPStateEvent struct {
-	Timestamp uint64
-	NewState  uint32
+	Timestamp       uint64
+	NewState        uint32
+	SourceIP        uint32
+	DestinationIP   uint32
+	SourcePort      uint16
+	DestinationPort uint16
+	NetnsID         uint32
+}
+
+func (e *TCPStateEvent) SourceAddress() string {
+	return net.IPv4(byte(e.SourceIP), byte(e.SourceIP>>8), byte(e.SourceIP>>16), byte(e.SourceIP>>24)).String()
+}
+func (e *TCPStateEvent) DestinationAddress() string {
+	return net.IPv4(byte(e.DestinationIP), byte(e.DestinationIP>>8), byte(e.DestinationIP>>16), byte(e.DestinationIP>>24)).String()
 }
 
 // NewTCPStateMonitor creates a new TCP state monitor
@@ -79,12 +94,14 @@ func (m *TCPStateMonitor) Start() error {
 
 // Stop stops the TCP state monitor
 func (m *TCPStateMonitor) Stop() error {
-	close(m.stopChan)
-
-	if m.reader != nil {
-		return m.reader.Close()
-	}
-	return nil
+	var err error
+	m.stopOnce.Do(func() {
+		close(m.stopChan)
+		if m.reader != nil {
+			err = m.reader.Close()
+		}
+	})
+	return err
 }
 
 // readEvents reads and processes TCP state events from kernel
@@ -100,8 +117,13 @@ func (m *TCPStateMonitor) readEvents() {
 
 		record, err := m.reader.Read()
 		if err != nil {
+			select {
+			case <-m.stopChan:
+				return
+			default:
+			}
 			m.Logger.Debug("failed to read tcp state event", zap.Error(err))
-			continue
+			return
 		}
 		readCount++
 

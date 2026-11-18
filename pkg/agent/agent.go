@@ -562,7 +562,7 @@ func (a *Agent) Start(ctx context.Context) error {
 	// Tracks handlers that push events to webhook: 6 eBPF monitors + 1 flow summary emitter + 1 TCP state handler
 	producerCount := 8
 	if a.TCPStateMonitor == nil {
-		producerCount = 7  // Skip TCP state handler if monitor not available
+		producerCount = 7 // Skip TCP state handler if monitor not available
 	}
 	a.producerWg.Add(producerCount)
 	go a.handleProcessEvents(producerCtx)
@@ -721,7 +721,7 @@ func (a *Agent) handleRuntimeEvent(
 			// Populate flow fields in NetworkContext
 			if flowKey != nil {
 				enrichedEvent.Network.FlowID = flowKey.String()
-				enrichedEvent.Network.IsReversed = false // Will be set by FlowTracker in future phases
+				enrichedEvent.Network.IsReversed = a.FlowTracker.IsReversed(flowKey)
 				a.Logger.Debug("flow tracked",
 					zap.String("flow_id", enrichedEvent.Network.FlowID),
 					zap.String("flow_state", string(flowState)),
@@ -1267,11 +1267,19 @@ func (a *Agent) ruleEngineConfig(ctx context.Context) *rules.EngineConfig {
 		ConfigMapName:      a.Config.Agent.Rules.ConfigMap.Name,
 		ConfigMapNamespace: a.Config.Agent.Rules.ConfigMap.Namespace,
 		Ctx:                ctx,
+		Mode:               a.getRuleEngineMode(),
 	}
 	if a.K8sClient != nil {
 		cfg.K8sClientset = a.K8sClient.GetClientset()
 	}
 	return cfg
+}
+
+func (a *Agent) getRuleEngineMode() string {
+	if engine := a.getRuleEngine(); engine != nil && engine.Mode != "" {
+		return engine.Mode
+	}
+	return rules.RuleModeCompliance
 }
 
 func (a *Agent) watchRuleUpdates(ctx context.Context) {
@@ -1562,11 +1570,17 @@ func (a *Agent) handleTCPStateEvents(ctx context.Context) {
 				zap.String("flow_state", network.FlowStateName(flowState)),
 			)
 
-			// Note: In a future enhancement, we would:
-			// 1. Extract 4-tuple from the kprobe context
-			// 2. Look up the flow in the flow tracker
-			// 3. Update its state
-			// For now, this demonstrates the integration point and metrics
+			if event.SourceIP != 0 && event.DestinationIP != 0 {
+				key, isNew, state := a.FlowTracker.AddOrUpdateFlow(
+					event.SourceAddress(), event.DestinationAddress(),
+					event.SourcePort, event.DestinationPort, "tcp", event.NetnsID, 0, flowState)
+				if isNew {
+					a.MetricsRegistry.RecordFlowCreated()
+				}
+				if state == network.FlowStateCLOSED {
+					a.FlowTracker.CloseFlow(key, "tcp_state")
+				}
+			}
 			a.MetricsRegistry.RecordEventProcessed()
 
 		case <-a.done:

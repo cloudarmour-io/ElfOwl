@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -21,10 +22,10 @@ import (
 type FlowState string
 
 const (
-	FlowStateNEW         FlowState = "new"          // SYN_SENT, SYN_RECV pending
-	FlowStateESTABLISHED FlowState = "established"  // bidirectional data flow
-	FlowStateCLOSING     FlowState = "closing"      // FIN_WAIT1, FIN_WAIT2, CLOSE_WAIT, LAST_ACK
-	FlowStateCLOSED      FlowState = "closed"       // fully terminated
+	FlowStateNEW         FlowState = "new"         // SYN_SENT, SYN_RECV pending
+	FlowStateESTABLISHED FlowState = "established" // bidirectional data flow
+	FlowStateCLOSING     FlowState = "closing"     // FIN_WAIT1, FIN_WAIT2, CLOSE_WAIT, LAST_ACK
+	FlowStateCLOSED      FlowState = "closed"      // fully terminated
 )
 
 // FlowKey uniquely identifies a bidirectional flow (order-independent)
@@ -50,16 +51,16 @@ func (fk *FlowKey) String() string {
 
 // FlowRecord tracks bidirectional flow state and metrics
 type FlowRecord struct {
-	Key               FlowKey
-	State             FlowState
-	CreatedAt         time.Time
-	LastSeenAt        time.Time      // for TTL-based expiry
-	BytesSent         uint64         // one direction
-	BytesRecv         uint64         // reverse direction
-	PacketsSent       uint64
-	PacketsRecv       uint64
-	CloseReason       string         // "fin", "reset", "timeout", "evicted"
-	IsReversed        bool           // track if this is reverse direction of established flow
+	Key         FlowKey
+	State       FlowState
+	CreatedAt   time.Time
+	LastSeenAt  time.Time // for TTL-based expiry
+	BytesSent   uint64    // one direction
+	BytesRecv   uint64    // reverse direction
+	PacketsSent uint64
+	PacketsRecv uint64
+	CloseReason string // "fin", "reset", "timeout", "evicted"
+	IsReversed  bool   // track if this is reverse direction of established flow
 }
 
 // FlowTracker correlates events into flows and manages flow state lifecycle
@@ -67,12 +68,13 @@ type FlowRecord struct {
 // Maintains active flows with configurable TTL and memory limits.
 // Emits closed flows to channel for webhook delivery.
 type FlowTracker struct {
-	flows            map[string]*FlowRecord  // key: flow key hash
-	mu               sync.RWMutex
-	activeTTL        time.Duration
-	maxActiveFlows   int
-	memoryLimitMB    int
-	closedFlowsChan  chan *FlowRecord       // emit closed flows for webhook
+	flows              map[string]*FlowRecord // key: flow key hash
+	mu                 sync.RWMutex
+	activeTTL          time.Duration
+	maxActiveFlows     int
+	memoryLimitMB      int
+	closedFlowsChan    chan *FlowRecord // emit closed flows for webhook
+	closedFlowsDropped atomic.Uint64
 }
 
 // NewFlowTracker creates tracker with configurable TTL and memory limits
@@ -122,7 +124,7 @@ func (ft *FlowTracker) AddOrUpdateFlow(srcIP, dstIP string, srcPort, dstPort uin
 		flow.State = newState
 
 		// Track if this is reverse direction
-		if (flow.Key.IP1 == srcIP && flow.Key.Port1 == srcPort) {
+		if flow.Key.IP1 == srcIP && flow.Key.Port1 == srcPort {
 			// Forward direction
 			flow.BytesSent += bytes
 			flow.PacketsSent++
@@ -139,13 +141,13 @@ func (ft *FlowTracker) AddOrUpdateFlow(srcIP, dstIP string, srcPort, dstPort uin
 	// Create new flow
 	isNewFlow = true
 	flow := &FlowRecord{
-		Key:        key,
-		State:      FlowStateNEW,
-		CreatedAt:  now,
-		LastSeenAt: now,
-		BytesSent:  bytes,
+		Key:         key,
+		State:       newState,
+		CreatedAt:   now,
+		LastSeenAt:  now,
+		BytesSent:   bytes,
 		PacketsSent: 1,
-		IsReversed: isReversed,
+		IsReversed:  isReversed,
 	}
 
 	ft.flows[keyStr] = flow
@@ -153,7 +155,20 @@ func (ft *FlowTracker) AddOrUpdateFlow(srcIP, dstIP string, srcPort, dstPort uin
 	// Check if we need to evict old flows due to memory pressure
 	ft.evictIfNeeded()
 
-	return &key, isNewFlow, FlowStateNEW
+	return &key, isNewFlow, newState
+}
+
+// IsReversed reports the direction of the most recent event for a flow.
+func (ft *FlowTracker) IsReversed(key *FlowKey) bool {
+	if key == nil {
+		return false
+	}
+	ft.mu.RLock()
+	defer ft.mu.RUnlock()
+	if flow, ok := ft.flows[key.String()]; ok {
+		return flow.IsReversed
+	}
+	return false
 }
 
 // GetFlowState returns current state of a flow or nil if not found
@@ -182,7 +197,7 @@ func (ft *FlowTracker) CloseFlow(key *FlowKey, reason string) {
 		select {
 		case ft.closedFlowsChan <- flow:
 		default:
-			// Channel full, drop (should not happen with buffered channel)
+			ft.closedFlowsDropped.Add(1)
 		}
 
 		// Remove from active flows
@@ -214,6 +229,7 @@ func (ft *FlowTracker) ExpireOldFlows() int {
 			select {
 			case ft.closedFlowsChan <- flow:
 			default:
+				ft.closedFlowsDropped.Add(1)
 			}
 
 			delete(ft.flows, keyStr)
@@ -270,6 +286,7 @@ func (ft *FlowTracker) evictOldest(count int) {
 		select {
 		case ft.closedFlowsChan <- flow:
 		default:
+			ft.closedFlowsDropped.Add(1)
 		}
 
 		delete(ft.flows, flow.Key.String())
@@ -278,10 +295,11 @@ func (ft *FlowTracker) evictOldest(count int) {
 
 // Stats returns current flow table statistics (useful for metrics)
 type FlowStats struct {
-	ActiveFlows    int
-	MemoryUsedMB   float64
-	FlowsExpiredTTL int64
-	FlowsEvictedMem int64
+	ActiveFlows        int
+	MemoryUsedMB       float64
+	FlowsExpiredTTL    int64
+	FlowsEvictedMem    int64
+	ClosedFlowsDropped uint64
 }
 
 // Stats returns current flow table statistics
@@ -292,8 +310,9 @@ func (ft *FlowTracker) Stats() FlowStats {
 	memUsed := float64((len(ft.flows) * 500)) / (1024.0 * 1024.0)
 
 	return FlowStats{
-		ActiveFlows:  len(ft.flows),
-		MemoryUsedMB: memUsed,
+		ActiveFlows:        len(ft.flows),
+		MemoryUsedMB:       memUsed,
+		ClosedFlowsDropped: ft.closedFlowsDropped.Load(),
 	}
 }
 
