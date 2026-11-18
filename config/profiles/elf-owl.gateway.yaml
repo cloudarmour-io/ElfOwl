@@ -10,6 +10,13 @@
 # - Hostname and process enrichment (no K8s required)
 
 agent:
+
+  # Bounded in-memory conntrack-style flow table.
+  flow_tracking:
+    active_ttl: 10m
+    max_active_flows: 500000
+    memory_limit_mb: 256
+
   # Cluster identification
   cluster_id: "gateway"
   node_name: "${HOSTNAME}"

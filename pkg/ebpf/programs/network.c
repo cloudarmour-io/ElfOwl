@@ -18,6 +18,7 @@ struct network_event {
 	__u8 state;
 	__u32 netns;
 	__u64 cgroup_id;
+	__u32 bytes;
 } __attribute__((packed));
 
 struct {
@@ -204,6 +205,7 @@ int network_udp_send(struct sys_enter_sendto_ctx *ctx)
 	evt.state = 0;
 	evt.netns = current_netns_inum();
 	evt.cgroup_id = bpf_get_current_cgroup_id();
+	evt.bytes = sendto.len > 0 ? (__u32)sendto.len : 0;
 	__builtin_memcpy(evt.daddr_v6, daddr_v6, sizeof(evt.daddr_v6));
 
 	SUBMIT_EVENT(ctx, network_events, &evt);

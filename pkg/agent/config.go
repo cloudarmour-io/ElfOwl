@@ -66,19 +66,27 @@ type Config struct {
 // ANCHOR: Pluggable enrichment backend selection - Feature: environment-agnostic enrichment - Jul 18, 2026
 // EnrichmentBackend enables selection of enrichment backend (bare-metal, kubernetes, disabled)
 type AgentConfig struct {
-	ClusterID           string                    `yaml:"cluster_id"`
-	NodeName            string                    `yaml:"node_name"`
-	Logging             LoggingConfig             `yaml:"logging"`
-	EBPF                EBPFConfig                `yaml:"ebpf"`
-	Kubernetes          KubernetesConfig          `yaml:"kubernetes"`
-	Rules               RulesConfig               `yaml:"rules"`
-	Enrichment          EnrichmentConfig          `yaml:"enrichment"`          // Deprecated, kept for backward compat
-	EnrichmentBackend   EnrichmentBackendConfig   `yaml:"enrichment_backend"`  // New pluggable backend config
-	Evidence            EvidenceConfig            `yaml:"evidence"`
-	OWL                 OWLConfig                 `yaml:"owl_api"`
-	Metrics             MetricsConfig             `yaml:"metrics"`
-	Health              HealthConfig              `yaml:"health"`
-	Webhook             WebhookConfig             `yaml:"webhook"`
+	ClusterID         string                  `yaml:"cluster_id"`
+	NodeName          string                  `yaml:"node_name"`
+	Logging           LoggingConfig           `yaml:"logging"`
+	EBPF              EBPFConfig              `yaml:"ebpf"`
+	Kubernetes        KubernetesConfig        `yaml:"kubernetes"`
+	Rules             RulesConfig             `yaml:"rules"`
+	Enrichment        EnrichmentConfig        `yaml:"enrichment"`         // Deprecated, kept for backward compat
+	EnrichmentBackend EnrichmentBackendConfig `yaml:"enrichment_backend"` // New pluggable backend config
+	Evidence          EvidenceConfig          `yaml:"evidence"`
+	OWL               OWLConfig               `yaml:"owl_api"`
+	Metrics           MetricsConfig           `yaml:"metrics"`
+	Health            HealthConfig            `yaml:"health"`
+	Webhook           WebhookConfig           `yaml:"webhook"`
+	FlowTracking      FlowTrackingConfig      `yaml:"flow_tracking"`
+}
+
+// FlowTrackingConfig controls the in-memory network flow table.
+type FlowTrackingConfig struct {
+	ActiveTTL      time.Duration `yaml:"active_ttl"`
+	MaxActiveFlows int           `yaml:"max_active_flows"`
+	MemoryLimitMB  int           `yaml:"memory_limit_mb"`
 }
 
 // LoggingConfig defines logging behavior
@@ -165,7 +173,7 @@ type KubernetesConfig struct {
 // ANCHOR: Mode-aware rules configuration - Feature: dual-mode network-behavior + compliance - Jul 18, 2026
 // Mode field enables selection between network-behavior detection (default), compliance checking, or dual mode
 type RulesConfig struct {
-	Mode      string `yaml:"mode"`       // "network-behavior" (default), "compliance", or "dual"
+	Mode      string `yaml:"mode"`      // "network-behavior" (default), "compliance", or "dual"
 	FilePath  string `yaml:"file_path"` // Path to YAML rules file (e.g., /etc/elf-owl/rules.yaml)
 	ConfigMap struct {
 		Name      string `yaml:"name"`
@@ -183,9 +191,9 @@ type RulesConfig struct {
 // - "disabled": No enrichment (minimal overhead)
 // Each backend has optional configuration for caching, feature flags, etc.
 type EnrichmentBackendConfig struct {
-	Type       string                        `yaml:"type"`        // "bare-metal", "kubernetes", or "disabled"
-	BareMetal  BareMetalEnrichmentConfig     `yaml:"bare_metal"`
-	Kubernetes KubernetesEnrichmentConfig    `yaml:"kubernetes"`
+	Type       string                     `yaml:"type"` // "bare-metal", "kubernetes", or "disabled"
+	BareMetal  BareMetalEnrichmentConfig  `yaml:"bare_metal"`
+	Kubernetes KubernetesEnrichmentConfig `yaml:"kubernetes"`
 }
 
 // BareMetalEnrichmentConfig defines bare-metal enrichment options
@@ -203,11 +211,11 @@ type BareMetalEnrichmentConfig struct {
 // ANCHOR: Kubernetes enrichment backend config - Feature: optional K8s context - Jul 18, 2026
 // Configuration for Kubernetes cluster deployments
 type KubernetesEnrichmentConfig struct {
-	InCluster            bool          `yaml:"in_cluster"`              // Use in-cluster auth
-	KubeConfig           string        `yaml:"kubeconfig"`              // Path to kubeconfig file
-	MetadataCacheTTL     time.Duration `yaml:"metadata_cache_ttl"`      // Pod/service account cache TTL
+	InCluster             bool          `yaml:"in_cluster"`              // Use in-cluster auth
+	KubeConfig            string        `yaml:"kubeconfig"`              // Path to kubeconfig file
+	MetadataCacheTTL      time.Duration `yaml:"metadata_cache_ttl"`      // Pod/service account cache TTL
 	CgroupRefreshInterval time.Duration `yaml:"cgroup_refresh_interval"` // How often to refresh pod->container mappings
-	EnrichmentTimeout    time.Duration `yaml:"enrichment_timeout"`      // Timeout for K8s API calls
+	EnrichmentTimeout     time.Duration `yaml:"enrichment_timeout"`      // Timeout for K8s API calls
 }
 
 // EnrichmentConfig (deprecated, kept for backward compatibility)
@@ -500,8 +508,9 @@ func DefaultConfig() *Config {
 
 	return &Config{
 		Agent: AgentConfig{
-			ClusterID: "default",
-			NodeName:  hostname,
+			ClusterID:    "default",
+			FlowTracking: FlowTrackingConfig{ActiveTTL: 30 * time.Minute, MaxActiveFlows: 500000, MemoryLimitMB: 256},
+			NodeName:     hostname,
 			Logging: LoggingConfig{
 				Level:  "info",
 				Format: "json",

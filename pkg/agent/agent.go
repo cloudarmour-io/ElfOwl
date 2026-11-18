@@ -60,6 +60,8 @@ type MetricsRecorder interface {
 	SetFlowsActive(count int)
 }
 
+type flowMemoryRecorder interface{ SetFlowTrackerMemory(float64) }
+
 // Agent is the main compliance observer agent
 type Agent struct {
 	Config *Config
@@ -353,16 +355,13 @@ func NewAgent(config *Config) (*Agent, error) {
 	// Creates tracker with configurable TTL and memory limits for flow state management.
 	// Default: 30-minute TTL, 500k max active flows, 256MB memory limit.
 	// Tracks bidirectional network flows with simplified 4-state machine (NEW, ESTABLISHED, CLOSING, CLOSED).
-	flowTracker := network.NewFlowTracker(
-		30*time.Minute, // activeTTL: default for gateways (configurable in future)
-		500000,         // maxActiveFlows: max concurrent flows before LRU eviction
-		256,            // memoryLimitMB: memory budget for flow tracking
-	)
+	flowConfig := config.Agent.FlowTracking
+	flowTracker := network.NewFlowTracker(flowConfig.ActiveTTL, flowConfig.MaxActiveFlows, flowConfig.MemoryLimitMB)
 	agent.FlowTracker = flowTracker
 	agent.Logger.Info("flow tracker initialized",
-		zap.Int("max_flows", 500000),
-		zap.Int("memory_limit_mb", 256),
-		zap.Duration("ttl", 30*time.Minute),
+		zap.Int("max_flows", flowTracker.MaxActiveFlows()),
+		zap.Int("memory_limit_mb", flowTracker.MemoryLimitMB()),
+		zap.Duration("ttl", flowTracker.ActiveTTL()),
 	)
 
 	// Note: TCP state monitor is initialized later in Start() after eBPF programs are loaded
@@ -714,7 +713,7 @@ func (a *Agent) handleRuntimeEvent(
 				enrichedEvent.Network.DestinationPort,
 				enrichedEvent.Network.Protocol,
 				enrichedEvent.Network.NetworkNamespaceID,
-				0, // bytes - will be set to 0 for now (can be extended with packet size in future)
+				networkEventBytes(enrichedEvent.RawEvent),
 				flowStateValue,
 			)
 
@@ -728,6 +727,15 @@ func (a *Agent) handleRuntimeEvent(
 					zap.String("state_source", enrichedEvent.Network.ConnectionState),
 					zap.Bool("is_new", isNewFlow),
 				)
+				if bytes := networkEventBytes(enrichedEvent.RawEvent); bytes > 0 {
+					if enrichedEvent.Network.IsReversed {
+						enrichedEvent.Network.BytesIn = bytes
+						enrichedEvent.Network.PacketsIn = 1
+					} else {
+						enrichedEvent.Network.BytesOut = bytes
+						enrichedEvent.Network.PacketsOut = 1
+					}
+				}
 				// ANCHOR: Record flow creation metric - Bug: elf_owl_flows_created_total never incremented - Aug 14, 2026
 				if isNewFlow {
 					a.MetricsRegistry.RecordFlowCreated()
@@ -738,7 +746,7 @@ func (a *Agent) handleRuntimeEvent(
 				// flow from the active map or pushed it onto FlowTracker.ClosedFlows() for the
 				// webhook emitter/RecordFlowClosed metric until CloseFlow actually ran.
 				if flowState == network.FlowStateCLOSED {
-					a.FlowTracker.CloseFlow(flowKey, "fin")
+					a.FlowTracker.CloseFlow(flowKey, network.FlowCloseReason(enrichedEvent.Network.ConnectionState))
 				}
 			}
 		}
@@ -1113,6 +1121,7 @@ func (a *Agent) pushEvents(ctx context.Context) {
 func (a *Agent) collectMetrics(ctx context.Context) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
+	var previousExpired, previousEvicted int64
 
 	for {
 		select {
@@ -1138,7 +1147,23 @@ func (a *Agent) collectMetrics(ctx context.Context) {
 			// SetFlowsActive existed on metrics.Registry but was never called; FlowTracker.Stats()
 			// already tracks ActiveFlows, so refresh the gauge on the same periodic tick.
 			if a.FlowTracker != nil {
-				a.MetricsRegistry.SetFlowsActive(a.FlowTracker.Stats().ActiveFlows)
+				flowStats := a.FlowTracker.Stats()
+				a.MetricsRegistry.SetFlowsActive(flowStats.ActiveFlows)
+				if recorder, ok := a.MetricsRegistry.(flowMemoryRecorder); ok {
+					recorder.SetFlowTrackerMemory(flowStats.MemoryUsedMB)
+				}
+				if recorder, ok := a.MetricsRegistry.(interface{ RecordFlowTrackerExpiration() }); ok {
+					for i := previousExpired; i < flowStats.FlowsExpiredTTL; i++ {
+						recorder.RecordFlowTrackerExpiration()
+					}
+				}
+				if recorder, ok := a.MetricsRegistry.(interface{ RecordFlowTrackerEviction() }); ok {
+					for i := previousEvicted; i < flowStats.FlowsEvictedMem; i++ {
+						recorder.RecordFlowTrackerEviction()
+					}
+				}
+				previousExpired = flowStats.FlowsExpiredTTL
+				previousEvicted = flowStats.FlowsEvictedMem
 			}
 
 		case <-a.done:
@@ -1280,6 +1305,17 @@ func (a *Agent) getRuleEngineMode() string {
 		return engine.Mode
 	}
 	return rules.RuleModeCompliance
+}
+
+func networkEventBytes(raw interface{}) uint64 {
+	switch event := raw.(type) {
+	case *ebpf.NetworkEvent:
+		return uint64(event.Bytes)
+	case ebpf.NetworkEvent:
+		return uint64(event.Bytes)
+	default:
+		return 0
+	}
 }
 
 func (a *Agent) watchRuleUpdates(ctx context.Context) {

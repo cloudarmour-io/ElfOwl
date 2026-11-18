@@ -21,3 +21,12 @@ func TestAddOrUpdateFlowPreservesInitialStateAndDirection(t *testing.T) {
 		t.Fatal("reverse update was not marked reversed")
 	}
 }
+
+func TestAddOrUpdateFlowCanonicalizesLoopbackTuple(t *testing.T) {
+	tracker := NewFlowTracker(0, 100, 1)
+	key, created, _ := tracker.AddOrUpdateFlow("127.0.0.1", "127.0.0.1", 40000, 443, "tcp", 1, 0, FlowStateNEW)
+	reverseKey, reverseCreated, _ := tracker.AddOrUpdateFlow("127.0.0.1", "127.0.0.1", 443, 40000, "tcp", 1, 0, FlowStateESTABLISHED)
+	if !created || reverseCreated || key.String() != reverseKey.String() {
+		t.Fatalf("loopback tuple was not canonicalized: created=%v reverse_created=%v", created, reverseCreated)
+	}
+}

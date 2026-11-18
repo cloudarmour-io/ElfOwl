@@ -71,6 +71,7 @@ type NetworkEvent struct {
 	State     uint8
 	NetNS     uint32
 	CgroupID  uint64
+	Bytes     uint32 // payload length when supplied by the hook (UDP sendto)
 }
 
 // ============================================================================

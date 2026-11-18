@@ -3,6 +3,8 @@
 
 package network
 
+import "strings"
+
 // TCP state constants (from Linux kernel include/net/tcp_states.h)
 const (
 	TCPEstablished = 1
@@ -33,12 +35,14 @@ func TCPStateToFlowState(tcpState uint32) FlowState {
 		return FlowStateESTABLISHED
 	case TCPFinWait1, TCPFinWait2, TCPCloseWait, TCPLastAck, TCPClosing:
 		return FlowStateCLOSING
-	case TCPTimeWait, TCPClose:
+	case TCPTimeWait:
+		return FlowStateCLOSING
+	case TCPClose:
 		return FlowStateCLOSED
 	case TCPListen:
-		return ""  // Ignore server listening sockets
+		return "" // Ignore server listening sockets
 	default:
-		return ""  // Unknown state
+		return "" // Unknown state
 	}
 }
 
@@ -58,7 +62,9 @@ func FlowStateFromName(name string) FlowState {
 		return FlowStateESTABLISHED
 	case "FIN_WAIT1", "FIN_WAIT2", "CLOSE_WAIT", "LAST_ACK", "CLOSING":
 		return FlowStateCLOSING
-	case "TIME_WAIT", "CLOSE":
+	case "TIME_WAIT":
+		return FlowStateCLOSING
+	case "CLOSE":
 		return FlowStateCLOSED
 	default: // LISTEN, UNKNOWN, ""
 		return ""
@@ -108,5 +114,17 @@ func FlowStateName(state FlowState) string {
 		return "CLOSED"
 	default:
 		return "UNKNOWN"
+	}
+}
+
+// FlowCloseReason maps kernel/network state labels to webhook close reasons.
+func FlowCloseReason(state string) string {
+	switch strings.ToUpper(state) {
+	case "RESET", "RST", "ABORT":
+		return "reset"
+	case "TIME_WAIT", "CLOSE", "FIN_WAIT1", "FIN_WAIT2", "CLOSE_WAIT", "LAST_ACK", "CLOSING":
+		return "fin"
+	default:
+		return "unknown"
 	}
 }

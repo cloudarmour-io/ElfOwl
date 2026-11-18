@@ -10,9 +10,11 @@
 package network
 
 import (
+	"container/heap"
 	"crypto/md5"
 	"fmt"
-	"sort"
+	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -61,6 +63,7 @@ type FlowRecord struct {
 	PacketsRecv uint64
 	CloseReason string // "fin", "reset", "timeout", "evicted"
 	IsReversed  bool   // track if this is reverse direction of established flow
+	heapIndex   int
 }
 
 // FlowTracker correlates events into flows and manages flow state lifecycle
@@ -75,6 +78,9 @@ type FlowTracker struct {
 	memoryLimitMB      int
 	closedFlowsChan    chan *FlowRecord // emit closed flows for webhook
 	closedFlowsDropped atomic.Uint64
+	flowsExpiredTTL    atomic.Int64
+	flowsEvicted       atomic.Int64
+	oldest             flowHeap
 }
 
 // NewFlowTracker creates tracker with configurable TTL and memory limits
@@ -121,7 +127,8 @@ func (ft *FlowTracker) AddOrUpdateFlow(srcIP, dstIP string, srcPort, dstPort uin
 	if flow, exists := ft.flows[keyStr]; exists {
 		// Update existing flow
 		flow.LastSeenAt = now
-		flow.State = newState
+		heap.Fix(&ft.oldest, flow.heapIndex)
+		flow.State = nextFlowState(flow.State, newState)
 
 		// Track if this is reverse direction
 		if flow.Key.IP1 == srcIP && flow.Key.Port1 == srcPort {
@@ -135,7 +142,7 @@ func (ft *FlowTracker) AddOrUpdateFlow(srcIP, dstIP string, srcPort, dstPort uin
 			isReversed = true
 		}
 
-		return &key, false, newState
+		return &key, false, flow.State
 	}
 
 	// Create new flow
@@ -148,9 +155,11 @@ func (ft *FlowTracker) AddOrUpdateFlow(srcIP, dstIP string, srcPort, dstPort uin
 		BytesSent:   bytes,
 		PacketsSent: 1,
 		IsReversed:  isReversed,
+		heapIndex:   -1,
 	}
 
 	ft.flows[keyStr] = flow
+	heap.Push(&ft.oldest, flow)
 
 	// Check if we need to evict old flows due to memory pressure
 	ft.evictIfNeeded()
@@ -202,6 +211,7 @@ func (ft *FlowTracker) CloseFlow(key *FlowKey, reason string) {
 
 		// Remove from active flows
 		delete(ft.flows, keyStr)
+		heap.Remove(&ft.oldest, flow.heapIndex)
 	}
 }
 
@@ -209,6 +219,10 @@ func (ft *FlowTracker) CloseFlow(key *FlowKey, reason string) {
 func (ft *FlowTracker) ClosedFlows() <-chan *FlowRecord {
 	return ft.closedFlowsChan
 }
+
+func (ft *FlowTracker) ActiveTTL() time.Duration { return ft.activeTTL }
+func (ft *FlowTracker) MaxActiveFlows() int      { return ft.maxActiveFlows }
+func (ft *FlowTracker) MemoryLimitMB() int       { return ft.memoryLimitMB }
 
 // ExpireOldFlows removes flows idle > activeTTL; called periodically (every 10s)
 // ANCHOR: Flow TTL expiry - Feature: configurable flow timeout - Jul 18, 2026
@@ -233,7 +247,9 @@ func (ft *FlowTracker) ExpireOldFlows() int {
 			}
 
 			delete(ft.flows, keyStr)
+			heap.Remove(&ft.oldest, flow.heapIndex)
 			expired++
+			ft.flowsExpiredTTL.Add(1)
 		}
 	}
 
@@ -266,19 +282,9 @@ func (ft *FlowTracker) evictOldest(count int) {
 		return
 	}
 
-	// Sort flows by LastSeenAt
-	flows := make([]*FlowRecord, 0, len(ft.flows))
-	for _, flow := range ft.flows {
-		flows = append(flows, flow)
-	}
-
-	sort.Slice(flows, func(i, j int) bool {
-		return flows[i].LastSeenAt.Before(flows[j].LastSeenAt)
-	})
-
 	// Evict oldest N
-	for i := 0; i < count && i < len(flows); i++ {
-		flow := flows[i]
+	for i := 0; i < count && ft.oldest.Len() > 0; i++ {
+		flow := heap.Pop(&ft.oldest).(*FlowRecord)
 		flow.State = FlowStateCLOSED
 		flow.CloseReason = "evicted"
 
@@ -290,7 +296,30 @@ func (ft *FlowTracker) evictOldest(count int) {
 		}
 
 		delete(ft.flows, flow.Key.String())
+		ft.flowsEvicted.Add(1)
 	}
+}
+
+type flowHeap []*FlowRecord
+
+func (h flowHeap) Len() int           { return len(h) }
+func (h flowHeap) Less(i, j int) bool { return h[i].LastSeenAt.Before(h[j].LastSeenAt) }
+func (h flowHeap) Swap(i, j int) {
+	h[i], h[j] = h[j], h[i]
+	h[i].heapIndex, h[j].heapIndex = i, j
+}
+func (h *flowHeap) Push(value interface{}) {
+	flow := value.(*FlowRecord)
+	flow.heapIndex = len(*h)
+	*h = append(*h, flow)
+}
+func (h *flowHeap) Pop() interface{} {
+	old := *h
+	n := len(old)
+	flow := old[n-1]
+	flow.heapIndex = -1
+	*h = old[:n-1]
+	return flow
 }
 
 // Stats returns current flow table statistics (useful for metrics)
@@ -313,6 +342,8 @@ func (ft *FlowTracker) Stats() FlowStats {
 		ActiveFlows:        len(ft.flows),
 		MemoryUsedMB:       memUsed,
 		ClosedFlowsDropped: ft.closedFlowsDropped.Load(),
+		FlowsExpiredTTL:    ft.flowsExpiredTTL.Load(),
+		FlowsEvictedMem:    ft.flowsEvicted.Load(),
 	}
 }
 
@@ -320,26 +351,45 @@ func (ft *FlowTracker) Stats() FlowStats {
 // ANCHOR: Canonical flow key creation - Feature: bidirectional matching - Jul 18, 2026
 // Ensures src→dst and dst→src events map to the same flow.
 func createCanonicalFlowKey(srcIP, dstIP string, srcPort, dstPort uint16, protocol string, netnsID uint32) FlowKey {
-	// Use string comparison for canonical ordering
-	ips := []string{srcIP, dstIP}
-
-	sort.Strings(ips)
-
-	// Find which port corresponds to which IP
-	key := FlowKey{
-		IP1:      ips[0],
-		IP2:      ips[1],
+	srcIP = normalizeIP(srcIP)
+	dstIP = normalizeIP(dstIP)
+	// Break equal-IP ties by port so loopback flows also canonicalize.
+	if srcIP > dstIP || (srcIP == dstIP && srcPort > dstPort) {
+		srcIP, dstIP = dstIP, srcIP
+		srcPort, dstPort = dstPort, srcPort
+	}
+	return FlowKey{
+		IP1:      srcIP,
+		Port1:    srcPort,
+		IP2:      dstIP,
+		Port2:    dstPort,
 		Protocol: protocol,
 		NetnsID:  netnsID,
 	}
+}
 
-	if ips[0] == srcIP {
-		key.Port1 = srcPort
-		key.Port2 = dstPort
-	} else {
-		key.Port1 = dstPort
-		key.Port2 = srcPort
+func normalizeIP(value string) string {
+	if parsed := net.ParseIP(strings.TrimSpace(value)); parsed != nil {
+		if v4 := parsed.To4(); v4 != nil {
+			return v4.String()
+		}
+		return parsed.String()
 	}
+	return strings.TrimSpace(value)
+}
 
-	return key
+func nextFlowState(current, incoming FlowState) FlowState {
+	if incoming == "" || current == FlowStateCLOSED {
+		return current
+	}
+	if incoming == FlowStateCLOSED || current == FlowStateNEW {
+		return incoming
+	}
+	if current == FlowStateESTABLISHED && incoming == FlowStateNEW {
+		return current
+	}
+	if current == FlowStateCLOSING && incoming != FlowStateCLOSED {
+		return current
+	}
+	return incoming
 }
